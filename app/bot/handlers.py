@@ -1,0 +1,1068 @@
+import logging
+import json
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, List, Optional
+import asyncio
+from io import BytesIO
+
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler, 
+    filters, ContextTypes, ConversationHandler
+)
+from telegram.constants import ParseMode
+from sqlalchemy import select, delete
+
+from db.database import async_session
+from models.user import User
+from models.chat import ChatMessage
+from models.reminder import Reminder
+from api.perplexity import PerplexityAPI
+from scheduler.reminder import ReminderScheduler
+from bot.utils import (
+    get_or_create_user, save_message, get_conversation_history, 
+    update_conversation_history, create_model_selection_keyboard,
+    create_thinking_mode_keyboard, create_settings_keyboard,
+    parse_reminder_time, parse_recurrence_pattern, 
+    is_image_request, is_reminder_request, extract_reminder_text
+)
+
+logger = logging.getLogger(__name__)
+
+# Conversation states
+(
+    AWAITING_REMINDER_CONFIRMATION,
+) = range(1)
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /start command."""
+    async with async_session() as session:
+        user = await get_or_create_user(session, update)
+        
+        welcome_text = (
+            "👋 Welcome to the Perplexity Telegram Bot!\n\n"
+            "I'm powered by Perplexity's Sonar API and can help you with:\n"
+            "🔍 Searching the web in real-time\n"
+            "🧠 Answering questions with AI reasoning\n"
+            "🔔 Setting reminders for important tasks\n"
+            "🖼️ Analyzing images you send\n\n"
+            "Just type your question or use one of these commands:\n"
+            "/settings - Change model, toggle thinking mode, manage reminders\n"
+            "/model - Change the AI model used for responses\n"
+            "/thinking - Toggle thinking mode on/off\n"
+            "/reminder - Set a new reminder\n"
+            "/clear - Clear your conversation history\n"
+            "/help - Show this message again"
+        )
+        
+        await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
+        
+        # Log the conversation start
+        await save_message(
+            session, 
+            user, 
+            "system", 
+            "Conversation started"
+        )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /help command."""
+    help_text = (
+        "🤖 *Perplexity Telegram Bot Help*\n\n"
+        "*Commands:*\n"
+        "/start - Start the bot\n"
+        "/settings - Open settings menu\n"
+        "/model - Change the AI model\n"
+        "/thinking - Toggle thinking mode\n"
+        "/reminder - Set a new reminder\n"
+        "/list_reminders - List your active reminders\n"
+        "/clear - Clear conversation history\n"
+        "/help - Show this help message\n\n"
+        
+        "*Features:*\n"
+        "🔍 *Web Search* - Ask any question to search the web\n"
+        "🧠 *Thinking Mode* - See the AI's reasoning process\n"
+        "🔔 *Reminders* - Set one-time or recurring reminders\n"
+        "🖼️ *Image Analysis* - Send an image with a question\n\n"
+        
+        "*Setting Reminders:*\n"
+        "- One-time: 'Remind me to call mom tomorrow at 5:00 PM'\n"
+        "- Recurring: 'Remind me to check email every day at 9:00 AM'\n\n"
+        
+        "*Models:*\n"
+        "- Sonar Pro - Fast search with grounding\n"
+        "- Sonar Reasoning - See step-by-step thinking\n"
+        "- Deep Research - Comprehensive answers for complex questions"
+    )
+    
+    await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /settings command."""
+    await update.message.reply_text(
+        "⚙️ *Settings*\n\nWhat would you like to configure?",
+        reply_markup=create_settings_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /model command."""
+    await update.message.reply_text(
+        "🤖 *Select Model*\n\nChoose which Perplexity model to use:",
+        reply_markup=create_model_selection_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def thinking_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /thinking command."""
+    async with async_session() as session:
+        user = await get_or_create_user(session, update)
+        
+        # Toggle thinking mode
+        user.thinking_mode = not user.thinking_mode
+        await session.commit()
+        
+        mode_text = "enabled ✅" if user.thinking_mode else "disabled ❌"
+        
+        await update.message.reply_text(
+            f"🧠 Thinking mode is now {mode_text}\n\n"
+            f"{'I will now show my reasoning process when answering questions using reasoning models.' if user.thinking_mode else 'I will now provide direct answers without showing my reasoning process.'}",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /clear command."""
+    async with async_session() as session:
+        user = await get_or_create_user(session, update)
+        
+        # Clear conversation history
+        user.conversation_history = "[]"
+        await session.commit()
+        
+        # Delete chat messages from database
+        await session.execute(
+            delete(ChatMessage).where(ChatMessage.user_id == user.id)
+        )
+        await session.commit()
+        
+        await update.message.reply_text(
+            "🗑️ Your conversation history has been cleared.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def reminder_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /reminder command."""
+    await update.message.reply_text(
+        "🔔 *New Reminder*\n\n"
+        "Please tell me what to remind you about and when.\n\n"
+        "*Examples:*\n"
+        "- Remind me to call mom tomorrow at 5:00 PM\n"
+        "- Remind me to check email in 30 minutes\n"
+        "- Remind me to take medicine every day at 9:00 AM\n"
+        "- Remind me to pay bills on the 15th of every month\n",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def list_reminders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /list_reminders command."""
+    async with async_session() as session:
+        user = await get_or_create_user(session, update)
+        
+        # Get active reminders
+        result = await session.execute(
+            select(Reminder).where(
+                Reminder.user_id == user.id,
+                Reminder.is_active == True
+            ).order_by(Reminder.scheduled_at)
+        )
+        reminders = result.scalars().all()
+        
+        # Determine if this is from a callback query or direct command
+        is_callback = update.callback_query is not None
+        
+        if not reminders:
+            message_text = "You don't have any active reminders."
+            if is_callback:
+                await update.callback_query.message.edit_text(
+                    message_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text(
+                    message_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            return
+        
+        # Format reminders list
+        now = datetime.now(timezone.utc)
+        reminder_text = "🔔 *Your Active Reminders:*\n\n"
+        
+        # Create keyboard buttons for each reminder
+        keyboard = []
+        
+        for i, reminder in enumerate(reminders, 1):
+            # Format scheduled time
+            if reminder.is_recurring:
+                time_str = f"Recurring: {reminder.recurrence_pattern}"
+            else:
+                # Format relative time
+                delta = reminder.scheduled_at - now
+                if delta.days < 0:
+                    time_str = "Overdue"
+                elif delta.days == 0:
+                    hours = delta.seconds // 3600
+                    minutes = (delta.seconds % 3600) // 60
+                    if hours > 0:
+                        time_str = f"In {hours}h {minutes}m"
+                    else:
+                        time_str = f"In {minutes}m"
+                elif delta.days == 1:
+                    time_str = f"Tomorrow at {reminder.scheduled_at.strftime('%H:%M')}"
+                else:
+                    time_str = reminder.scheduled_at.strftime("%d %b at %H:%M")
+            
+            # Add to list
+            reminder_text += f"{i}. *{reminder.text}*\n   📅 {time_str}\n\n"
+            
+            # Add delete button for this reminder
+            keyboard.append([InlineKeyboardButton(f"Delete Reminder #{i}", callback_data=f"delete_reminder_{reminder.id}")])
+        
+        # Add back button to settings
+        keyboard.append([InlineKeyboardButton("Back to Settings ⬅️", callback_data="settings")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Send the message based on update type
+        if is_callback:
+            await update.callback_query.message.edit_text(
+                reminder_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text(
+                reminder_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
+    """Handle callback queries from inline keyboards."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Extract the callback data
+    data = query.data
+    
+    async with async_session() as session:
+        user = await get_or_create_user(session, update)
+        
+        # Handle model selection
+        if data.startswith("model_"):
+            model = data.replace("model_", "")
+            user.preferred_model = model
+            await session.commit()
+            
+            # Get model name
+            perplexity_api = context.bot_data.get("perplexity_api")
+            models = await perplexity_api.get_available_models()
+            model_info = next((m for m in models if m["id"] == model), None)
+            model_name = model_info["name"] if model_info else model
+            
+            await query.edit_message_text(
+                f"✅ Model changed to *{model_name}*\n\n{model_info['description'] if model_info else ''}",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return None
+            
+        # Handle thinking mode toggle
+        elif data == "thinking_toggle":
+            user.thinking_mode = not user.thinking_mode
+            await session.commit()
+            
+            await query.edit_message_text(
+                f"🧠 *Thinking Mode Settings*\n\n{'When using reasoning models, I will show my step-by-step thought process before giving you the final answer.' if user.thinking_mode else 'I will provide direct answers without showing my thought process.'}",
+                reply_markup=create_thinking_mode_keyboard(user.thinking_mode),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return None
+            
+        # Handle settings menu
+        elif data == "settings":
+            await query.edit_message_text(
+                "⚙️ *Settings*\n\nWhat would you like to configure?",
+                reply_markup=create_settings_keyboard(),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return None
+            
+        # Handle change model from settings
+        elif data == "change_model":
+            await query.edit_message_text(
+                "🤖 *Select Model*\n\nChoose which Perplexity model to use:",
+                reply_markup=create_model_selection_keyboard(),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return None
+            
+        # Handle thinking settings from settings
+        elif data == "thinking_settings":
+            await query.edit_message_text(
+                f"🧠 *Thinking Mode Settings*\n\n{'When using reasoning models, I will show my step-by-step thought process before giving you the final answer.' if user.thinking_mode else 'I will provide direct answers without showing my thought process.'}",
+                reply_markup=create_thinking_mode_keyboard(user.thinking_mode),
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return None
+            
+        # Handle manage reminders from settings
+        elif data == "manage_reminders":
+            # Trigger the list_reminders_command
+            await query.edit_message_text(
+                "Loading your reminders..."
+            )
+            
+            # Simulate the /list_reminders command
+            await list_reminders_command(update, context)
+            return None
+            
+        # Handle delete reminder
+        elif data.startswith("delete_reminder_"):
+            try:
+                # Extract reminder ID
+                reminder_id = int(data.replace("delete_reminder_", ""))
+                
+                # Get reminder scheduler
+                scheduler = context.bot_data.get("reminder_scheduler")
+                if not scheduler:
+                    await query.edit_message_text(
+                        "❌ Error: Reminder scheduler not found. Please restart the bot."
+                    )
+                    return None
+                
+                # Delete the reminder
+                success = await scheduler.delete_reminder(reminder_id)
+                
+                if success:
+                    await query.edit_message_text(
+                        "✅ Reminder deleted successfully."
+                    )
+                    # Wait a moment then reload the reminders list
+                    await asyncio.sleep(1)
+                    await query.edit_message_text("Refreshing reminder list...")
+                    await list_reminders_command(update, context)
+                else:
+                    await query.edit_message_text(
+                        "❌ Reminder not found or already deleted."
+                    )
+            except ValueError:
+                await query.edit_message_text(
+                    "❌ Invalid reminder ID format."
+                )
+            return None
+            
+        # Handle clear history from settings
+        elif data == "clear_history":
+            # Clear conversation history
+            user.conversation_history = "[]"
+            await session.commit()
+            
+            # Delete chat messages from database
+            await session.execute(
+                delete(ChatMessage).where(ChatMessage.user_id == user.id)
+            )
+            await session.commit()
+            
+            await query.edit_message_text(
+                "🗑️ Your conversation history has been cleared.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return None
+            
+        # Handle reminder confirmation
+        elif data == "reminder_confirm":
+            # Get stored reminder data
+            reminder_data = context.user_data.get("pending_reminder")
+            if not reminder_data:
+                await query.edit_message_text(
+                    "❌ Error: Reminder data not found. Please try setting a new reminder."
+                )
+                return ConversationHandler.END
+            
+            # Extract data
+            text = reminder_data.get("text")
+            scheduled_at = reminder_data.get("scheduled_at")
+            is_recurring = reminder_data.get("is_recurring", False)
+            recurrence_pattern = reminder_data.get("recurrence_pattern")
+            
+            # Create reminder
+            scheduler = context.bot_data.get("reminder_scheduler")
+            if not scheduler:
+                logger.error("Reminder scheduler not found in bot_data")
+                await query.edit_message_text(
+                    "❌ Error: Reminder scheduler not found. Please restart the bot."
+                )
+                return ConversationHandler.END
+                
+            reminder = await scheduler.create_reminder(
+                user_id=user.id,
+                telegram_id=user.telegram_id,
+                text=text,
+                scheduled_at=scheduled_at,
+                is_recurring=is_recurring,
+                recurrence_pattern=recurrence_pattern
+            )
+            
+            # Confirmation message
+            if is_recurring:
+                await query.edit_message_text(
+                    f"✅ Recurring reminder set: *{text}*\n\n"
+                    f"📅 Pattern: {recurrence_pattern}\n"
+                    f"⏰ First occurrence: {scheduled_at.strftime('%d %b %Y at %H:%M')}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await query.edit_message_text(
+                    f"✅ Reminder set: *{text}*\n\n"
+                    f"⏰ Scheduled for: {scheduled_at.strftime('%d %b %Y at %H:%M')}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            
+            # Clean up
+            context.user_data.pop("pending_reminder", None)
+            return ConversationHandler.END
+            
+        # Handle reminder cancellation
+        elif data == "reminder_cancel":
+            # Clean up
+            context.user_data.pop("pending_reminder", None)
+            
+            await query.edit_message_text(
+                "❌ Reminder cancelled."
+            )
+            return ConversationHandler.END
+    
+    return None
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
+    """Handle user messages."""
+    # Get the user message
+    message = update.message
+    if not message or not message.text:
+        return None
+    
+    text = message.text.strip()
+    
+    # Check for special command patterns
+    if text.startswith("/delete_reminder_"):
+        # Extract reminder ID
+        try:
+            reminder_id = int(text.replace("/delete_reminder_", ""))
+            return await handle_delete_reminder(update, context, reminder_id)
+        except (ValueError, IndexError):
+            await message.reply_text("Invalid reminder ID format.")
+            return None
+    
+    # Check if it's a reminder request
+    if is_reminder_request(text):
+        return await handle_reminder_request(update, context, text)
+    
+    # Check if it's an image generation request
+    if is_image_request(text):
+        return await handle_image_generation(update, context, text)
+    
+    # Process as a regular question
+    return await handle_regular_message(update, context, text)
+
+async def handle_delete_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE, reminder_id: int) -> None:
+    """Handle deleting a reminder."""
+    scheduler = context.bot_data.get("reminder_scheduler")
+    
+    # Delete the reminder
+    success = await scheduler.delete_reminder(reminder_id)
+    
+    if success:
+        await update.message.reply_text(
+            "✅ Reminder deleted successfully.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Reminder not found or already deleted.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    return None
+
+async def handle_reminder_request(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> int:
+    """Handle a request to set a reminder."""
+    from bot.utils import parse_reminder_time, parse_recurrence_pattern, extract_reminder_text
+    
+    # Extract reminder text
+    reminder_text = extract_reminder_text(text)
+    
+    # Try to parse as recurring reminder first
+    recurrence_pattern, first_occurrence, recurrence_error = parse_recurrence_pattern(text)
+    
+    if recurrence_pattern and first_occurrence:
+        # It's a recurring reminder
+        keyboard = [
+            [
+                InlineKeyboardButton("Confirm ✅", callback_data="reminder_confirm"),
+                InlineKeyboardButton("Cancel ❌", callback_data="reminder_cancel")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Store reminder data
+        context.user_data["pending_reminder"] = {
+            "text": reminder_text,
+            "scheduled_at": first_occurrence,
+            "is_recurring": True,
+            "recurrence_pattern": recurrence_pattern
+        }
+        
+        await update.message.reply_text(
+            f"🔔 *Recurring Reminder*\n\n"
+            f"*Text:* {reminder_text}\n"
+            f"*Pattern:* {recurrence_pattern}\n"
+            f"*First occurrence:* {first_occurrence.strftime('%d %b %Y at %H:%M')}\n\n"
+            f"Is this correct?",
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return AWAITING_REMINDER_CONFIRMATION
+    
+    # Try to parse as one-time reminder
+    scheduled_time, error = parse_reminder_time(text)
+    
+    if scheduled_time:
+        # It's a one-time reminder
+        keyboard = [
+            [
+                InlineKeyboardButton("Confirm ✅", callback_data="reminder_confirm"),
+                InlineKeyboardButton("Cancel ❌", callback_data="reminder_cancel")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Store reminder data
+        context.user_data["pending_reminder"] = {
+            "text": reminder_text,
+            "scheduled_at": scheduled_time,
+            "is_recurring": False
+        }
+        
+        await update.message.reply_text(
+            f"🔔 *New Reminder*\n\n"
+            f"*Text:* {reminder_text}\n"
+            f"*Time:* {scheduled_time.strftime('%d %b %Y at %H:%M')}\n\n"
+            f"Is this correct?",
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return AWAITING_REMINDER_CONFIRMATION
+    
+    # Couldn't parse the time/pattern
+    error_message = error or recurrence_error or "I couldn't understand when to set the reminder."
+    
+    await update.message.reply_text(
+        f"❌ {error_message}\n\n"
+        f"Please try again with a clearer time format, like:\n"
+        f"- Remind me to call mom tomorrow at 5:00 PM\n"
+        f"- Remind me to check email in 30 minutes\n"
+        f"- Remind me to take medicine every day at 9:00 AM",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return None
+
+async def handle_image_generation(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    """Handle an image generation request."""
+    # Get Perplexity API
+    perplexity_api = context.bot_data.get("perplexity_api")
+    
+    # Send typing action
+    await update.message.chat.send_action(action="typing")
+    
+    # Generate image
+    response = await perplexity_api.generate_image(text)
+    
+    if not response.get("success"):
+        await update.message.reply_text(
+            "🖼️ I'm not able to generate images directly.\n\n"
+            "However, you can use dedicated image generation services like DALL-E, Midjourney, or Stable Diffusion to create images based on text prompts.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        # This part would handle a successful response if Perplexity had image generation
+        pass
+    
+    return None
+
+async def split_and_send_long_message(update: Update, text: str, parse_mode=None):
+    """
+    Split a long message into multiple chunks and send them.
+    
+    Args:
+        update: Telegram update
+        text: The text to send
+        parse_mode: Parse mode for the message
+    """
+    # Telegram message length limit is 4096 characters
+    MAX_MESSAGE_LENGTH = 4000  # Use a bit less than 4096 to be safe
+    
+    # Split by newlines to keep paragraphs together when possible
+    paragraphs = text.split('\n\n')
+    chunks = []
+    current_chunk = ""
+    
+    for paragraph in paragraphs:
+        # If adding this paragraph would exceed limit, start a new chunk
+        if len(current_chunk) + len(paragraph) + 2 > MAX_MESSAGE_LENGTH:
+            if current_chunk:
+                chunks.append(current_chunk)
+            
+            # If the paragraph itself is too long, split it further
+            if len(paragraph) > MAX_MESSAGE_LENGTH:
+                # Split into smaller pieces (may break mid-sentence)
+                words = paragraph.split(' ')
+                paragraph_chunk = ""
+                
+                for word in words:
+                    if len(paragraph_chunk) + len(word) + 1 > MAX_MESSAGE_LENGTH:
+                        chunks.append(paragraph_chunk)
+                        paragraph_chunk = word
+                    else:
+                        if paragraph_chunk:
+                            paragraph_chunk += " " + word
+                        else:
+                            paragraph_chunk = word
+                
+                if paragraph_chunk:
+                    current_chunk = paragraph_chunk
+                else:
+                    current_chunk = ""
+            else:
+                current_chunk = paragraph
+        else:
+            if current_chunk:
+                current_chunk += "\n\n" + paragraph
+            else:
+                current_chunk = paragraph
+    
+    # Add the last chunk if it's not empty
+    if current_chunk:
+        chunks.append(current_chunk)
+    
+    # Send each chunk as a separate message
+    for chunk in chunks:
+        try:
+            await update.message.reply_text(chunk)
+        except Exception as e:
+            logger.error(f"Error sending message chunk: {str(e)}")
+            # Try sending without parse mode if parsing fails
+            try:
+                # Remove any characters that might cause formatting issues
+                clean_text = ''.join(c for c in chunk if c.isalnum() or c.isspace() or c in ',.?!:;()[]{}')
+                await update.message.reply_text(clean_text)
+            except Exception as inner_e:
+                logger.error(f"Error sending plain message chunk: {str(inner_e)}")
+
+def sanitize_text(text):
+    """
+    Remove or escape characters that might cause issues with Telegram message formatting.
+    
+    Args:
+        text: The text to sanitize
+        
+    Returns:
+        Sanitized text safe for sending via Telegram
+    """
+    # Replace problematic characters
+    replacements = {
+        '<': '&lt;', 
+        '>': '&gt;',
+        '&': '&amp;',
+        '*': '',
+        '_': '',
+        '`': '',
+        '[': '(',
+        ']': ')',
+        '||': '',
+        '|': '',
+        '~': '',
+        '#': '',
+        '+': '',
+        '=': '',
+        '{': '(',
+        '}': ')'
+    }
+    
+    for char, replacement in replacements.items():
+        text = text.replace(char, replacement)
+    
+    return text
+
+async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    """Handle a regular message (question/query)."""
+    # Send typing action
+    await update.message.chat.send_action(action="typing")
+    
+    # Send a loading indicator message that we'll update later
+    loading_message = await update.message.reply_text("🧠 Processing your request... This might take a moment.")
+    
+    async with async_session() as session:
+        user = await get_or_create_user(session, update)
+        
+        # Save user's message
+        await save_message(
+            session,
+            user,
+            "user",
+            text,
+            message_id=update.message.message_id
+        )
+        
+        # Get user preferences
+        model = user.preferred_model
+        thinking_mode = user.thinking_mode
+        
+        # Use the properly formatted conversation history
+        conversation_history = get_conversation_history(user)
+        
+        # Process with Perplexity API
+        perplexity_api = context.bot_data.get("perplexity_api")
+        
+        # Keep the typing indicator active during processing
+        typing_task = asyncio.create_task(keep_typing_indicator(update))
+        
+        try:
+            # Call API
+            response = await perplexity_api.ask_question(
+                query=text,
+                model=model,
+                conversation_history=conversation_history,
+                show_thinking=thinking_mode
+            )
+            
+            # Cancel the typing indicator
+            typing_task.cancel()
+            
+            # Delete the loading message
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.message.chat_id,
+                    message_id=loading_message.message_id
+                )
+            except Exception as e:
+                logger.error(f"Error deleting loading message: {str(e)}")
+            
+            # Handle API response
+            if response.get("success"):
+                # Update conversation history
+                update_conversation_history(user, "user", text)
+                
+                if thinking_mode and "thinking" in response:
+                    # Get the thinking text and sanitize it
+                    thinking_text = sanitize_text(response['thinking'])
+                    
+                    # Add a simple header
+                    await update.message.reply_text("🧠 Thinking Process:", reply_to_message_id=update.message.message_id)
+                    
+                    # Break thinking text into chunks if needed
+                    if len(thinking_text) > 4000:
+                        chunks = [thinking_text[i:i+4000] for i in range(0, len(thinking_text), 4000)]
+                        for chunk in chunks:
+                            await update.message.reply_text(chunk)
+                    else:
+                        await update.message.reply_text(thinking_text)
+                    
+                    # Then send the answer, also sanitized
+                    answer = sanitize_text(response["answer"])
+                    await update.message.reply_text("📝 Answer:")
+                    await split_and_send_long_message(update, answer)
+                    
+                    # Save assistant's message
+                    await save_message(
+                        session,
+                        user,
+                        "assistant",
+                        f"[Thinking]: {response['thinking']}\n\n[Answer]: {answer}",
+                        model_used=model,
+                        include_thinking=True
+                    )
+                    
+                    # Update conversation history with just the answer
+                    update_conversation_history(user, "assistant", answer)
+                else:
+                    # Send the answer without any parse mode first
+                    answer = sanitize_text(response["answer"])
+                    await split_and_send_long_message(update, answer)
+                    
+                    # Save assistant's message
+                    await save_message(
+                        session,
+                        user,
+                        "assistant",
+                        answer,
+                        model_used=model
+                    )
+                    
+                    # Update conversation history
+                    update_conversation_history(user, "assistant", answer)
+            else:
+                # Handle error
+                error_message = response.get("error", "An error occurred while processing your request.")
+                await update.message.reply_text(
+                    f"❌ {sanitize_text(error_message)}"
+                )
+                
+                # Save error message
+                await save_message(
+                    session,
+                    user,
+                    "assistant",
+                    f"[Error]: {error_message}",
+                    model_used=model
+                )
+        except Exception as e:
+            # Cancel the typing indicator
+            typing_task.cancel()
+            
+            # Delete the loading message
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.message.chat_id,
+                    message_id=loading_message.message_id
+                )
+            except Exception as delete_error:
+                logger.error(f"Error deleting loading message: {str(delete_error)}")
+            
+            # Log and send error message
+            logger.error(f"Error processing message: {str(e)}")
+            await update.message.reply_text(
+                f"❌ An error occurred while processing your request: {sanitize_text(str(e))}"
+            )
+        
+        # Save updated conversation history
+        await session.commit()
+    
+    return None
+
+async def keep_typing_indicator(update: Update):
+    """Keep the typing indicator active with periodic updates."""
+    try:
+        while True:
+            await update.message.chat.send_action(action="typing")
+            await asyncio.sleep(4)  # Telegram's typing indicator lasts about 5 seconds
+    except asyncio.CancelledError:
+        # Task was cancelled - that's expected
+        pass
+    except Exception as e:
+        logger.error(f"Error in typing indicator: {str(e)}")
+
+async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle messages with photos."""
+    # Get the photo file
+    photo = update.message.photo[-1]  # Get the largest photo
+    
+    # Get the caption if any
+    caption = update.message.caption or "Describe this image"
+    
+    # Send typing action
+    await update.message.chat.send_action(action="typing")
+    
+    # Send a loading indicator message that we'll update later
+    loading_message = await update.message.reply_text("🧠 Processing your image... This might take a moment.")
+    
+    async with async_session() as session:
+        user = await get_or_create_user(session, update)
+        
+        # Get file from Telegram
+        photo_file = await context.bot.get_file(photo.file_id)
+        photo_bytes = await photo_file.download_as_bytearray()
+        
+        # Save user's message
+        await save_message(
+            session,
+            user,
+            "user",
+            f"[Image with caption: {caption}]",
+            message_id=update.message.message_id
+        )
+        
+        # Get user preferences
+        model = user.preferred_model
+        thinking_mode = user.thinking_mode
+        
+        # Get conversation history - now properly formatted
+        conversation_history = get_conversation_history(user)
+        
+        # Process with Perplexity API
+        perplexity_api = context.bot_data.get("perplexity_api")
+        
+        # Keep the typing indicator active during processing
+        typing_task = asyncio.create_task(keep_typing_indicator(update))
+        
+        try:
+            # Call API with image
+            response = await perplexity_api.ask_question(
+                query=caption,
+                model=model,
+                conversation_history=conversation_history,
+                show_thinking=thinking_mode,
+                image_data=photo_bytes
+            )
+            
+            # Cancel the typing indicator
+            typing_task.cancel()
+            
+            # Delete the loading message
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.message.chat_id,
+                    message_id=loading_message.message_id
+                )
+            except Exception as e:
+                logger.error(f"Error deleting loading message: {str(e)}")
+            
+            # Handle API response
+            if response.get("success"):
+                # Update conversation history
+                update_conversation_history(user, "user", caption)
+                
+                if thinking_mode and "thinking" in response:
+                    # Get the thinking text and sanitize it
+                    thinking_text = sanitize_text(response['thinking'])
+                    
+                    # Add a simple header
+                    await update.message.reply_text("🧠 Thinking Process:", reply_to_message_id=update.message.message_id)
+                    
+                    # Break thinking text into chunks if needed
+                    if len(thinking_text) > 4000:
+                        chunks = [thinking_text[i:i+4000] for i in range(0, len(thinking_text), 4000)]
+                        for chunk in chunks:
+                            await update.message.reply_text(chunk)
+                    else:
+                        await update.message.reply_text(thinking_text)
+                    
+                    # Then send the answer, also sanitized
+                    answer = sanitize_text(response["answer"])
+                    await update.message.reply_text("📝 Answer:")
+                    await split_and_send_long_message(update, answer)
+                    
+                    # Save assistant's message
+                    await save_message(
+                        session,
+                        user,
+                        "assistant",
+                        f"[Thinking]: {response['thinking']}\n\n[Answer]: {answer}",
+                        model_used=model,
+                        include_thinking=True
+                    )
+                    
+                    # Update conversation history with just the answer
+                    update_conversation_history(user, "assistant", answer)
+                else:
+                    # Send the answer without any parse mode first
+                    answer = sanitize_text(response["answer"])
+                    await split_and_send_long_message(update, answer)
+                    
+                    # Save assistant's message
+                    await save_message(
+                        session,
+                        user,
+                        "assistant",
+                        answer,
+                        model_used=model
+                    )
+                    
+                    # Update conversation history
+                    update_conversation_history(user, "assistant", answer)
+            else:
+                # Handle error
+                error_message = response.get("error", "An error occurred while processing your request.")
+                await update.message.reply_text(
+                    f"❌ {sanitize_text(error_message)}"
+                )
+                
+                # Save error message
+                await save_message(
+                    session,
+                    user,
+                    "assistant",
+                    f"[Error]: {error_message}",
+                    model_used=model
+                )
+        except Exception as e:
+            # Cancel the typing indicator
+            typing_task.cancel()
+            
+            # Delete the loading message
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.message.chat_id,
+                    message_id=loading_message.message_id
+                )
+            except Exception as delete_error:
+                logger.error(f"Error deleting loading message: {str(delete_error)}")
+            
+            # Log and send error message
+            logger.error(f"Error processing photo message: {str(e)}")
+            await update.message.reply_text(
+                f"❌ An error occurred while processing your image: {sanitize_text(str(e))}"
+            )
+        
+        # Save updated conversation history
+        await session.commit()
+
+def setup_handlers(bot_app: Application, perplexity_api: PerplexityAPI) -> None:
+    """Set up all handlers for the bot."""
+    # Store Perplexity API in context
+    bot_app.bot_data["perplexity_api"] = perplexity_api
+    
+    # Add command handlers
+    bot_app.add_handler(CommandHandler("start", start_command))
+    bot_app.add_handler(CommandHandler("help", help_command))
+    bot_app.add_handler(CommandHandler("settings", settings_command))
+    bot_app.add_handler(CommandHandler("model", model_command))
+    bot_app.add_handler(CommandHandler("thinking", thinking_command))
+    bot_app.add_handler(CommandHandler("clear", clear_command))
+    bot_app.add_handler(CommandHandler("reminder", reminder_command))
+    bot_app.add_handler(CommandHandler("list_reminders", list_reminders_command))
+    
+    # Add callback query handler
+    bot_app.add_handler(CallbackQueryHandler(callback_query_handler))
+    
+    # Add conversation handler for reminders
+    reminder_handler = ConversationHandler(
+        entry_points=[],  # Entry points are handled in handle_message
+        states={
+            AWAITING_REMINDER_CONFIRMATION: [
+                CallbackQueryHandler(callback_query_handler, pattern=r"^reminder_")
+            ],
+        },
+        fallbacks=[]
+    )
+    bot_app.add_handler(reminder_handler)
+    
+    # Add message handlers
+    bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Set bot commands for menu
+    asyncio.create_task(bot_app.bot.set_my_commands([
+        BotCommand("start", "Start the bot"),
+        BotCommand("settings", "Open settings menu"),
+        BotCommand("model", "Change AI model"),
+        BotCommand("thinking", "Toggle thinking mode"),
+        BotCommand("reminder", "Set a new reminder"),
+        BotCommand("list_reminders", "List active reminders"),
+        BotCommand("clear", "Clear conversation history"),
+        BotCommand("help", "Show help message")
+    ]))
+    
+    logger.info("Bot handlers set up successfully") 

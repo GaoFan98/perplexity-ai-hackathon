@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/perplexity
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}
+      - WEBHOOK_URL=${WEBHOOK_URL}
+    depends_on:
+      - db
+    restart: always
+
+  db:
+    image: postgres:15
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=perplexity
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data: 
