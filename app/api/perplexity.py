@@ -194,6 +194,14 @@ class PerplexityAPI:
                 # Extract response content
                 content = data["choices"][0]["message"]["content"]
                 
+                # Check if there are search results with links
+                search_results = None
+                if "search_results" in data.get("choices", [{}])[0].get("message", {}).get("metadata", {}):
+                    search_results = data["choices"][0]["message"]["metadata"]["search_results"]
+                
+                # Clean up any assistant tags at the beginning
+                content = re.sub(r'^(&amp;lt;｜Assistant｜&amp;gt;|<｜Assistant｜>)', '', content).strip()
+                
                 # For reasoning models, extract thinking and final answer if show_thinking is enabled
                 if show_thinking:
                     # Try to extract thinking content using tags
@@ -211,16 +219,38 @@ class PerplexityAPI:
                             "thinking": thinking,
                             "answer": answer,
                             "model": model,
+                            "search_results": search_results,
                             "full_response": data
                         }
                     # If no explicit tags but model is a reasoning model, try other patterns
                     elif "reasoning" in model:
+                        # Check for "📝 Answer:" marker which often separates thinking from answer
+                        if "📝 Answer:" in content:
+                            parts = content.split("📝 Answer:", 1)
+                            if len(parts) == 2:
+                                thinking = parts[0].strip()
+                                answer = parts[1].strip()
+                                
+                                # Make sure we don't have thinking content after the answer
+                                if "Here's my reasoning process:" in answer:
+                                    answer = answer.split("Here's my reasoning process:", 1)[0].strip()
+                                    
+                                return {
+                                    "success": True,
+                                    "thinking": thinking,
+                                    "answer": answer,
+                                    "model": model,
+                                    "search_results": search_results,
+                                    "full_response": data
+                                }
+                                
                         # Look for other patterns like "Thinking:" or "Reasoning:"
                         patterns = [
-                            (r"(?i)Thinking:\s*(.+?)(?=\n\n|$)", r"(?i)Answer:\s*(.+)"),
-                            (r"(?i)Reasoning:\s*(.+?)(?=\n\n|$)", r"(?i)Final Answer:\s*(.+)"),
-                            (r"(?i)Step by step:\s*(.+?)(?=\n\n|$)", r"(?i)Response:\s*(.+)"),
-                            (r"(?i)Analysis:\s*(.+?)(?=\n\n|$)", r"(?i)Conclusion:\s*(.+)")
+                            (r"(?i)Thinking:\s*(.+?)(?=\n\n📝 Answer:|$)", r"(?i)📝 Answer:\s*(.+)"),
+                            (r"(?i)Here's my reasoning process:\s*(.+?)(?=\n\n📝 Answer:|$)", r"(?i)📝 Answer:\s*(.+)"),
+                            (r"(?i)Reasoning:\s*(.+?)(?=\n\nAnswer:|$)", r"(?i)Answer:\s*(.+)"),
+                            (r"(?i)Step by step:\s*(.+?)(?=\n\nResponse:|$)", r"(?i)Response:\s*(.+)"),
+                            (r"(?i)Analysis:\s*(.+?)(?=\n\nConclusion:|$)", r"(?i)Conclusion:\s*(.+)")
                         ]
                         
                         for thinking_pattern, answer_pattern in patterns:
@@ -231,16 +261,55 @@ class PerplexityAPI:
                                 thinking = thinking_match.group(1).strip()
                                 answer = answer_match.group(1).strip()
                                 
+                                # Make sure there's no continuation of thinking after answer has started
+                                if "Here's my reasoning process:" in answer:
+                                    answer = answer.split("Here's my reasoning process:", 1)[0].strip()
+                                
                                 return {
                                     "success": True,
                                     "thinking": thinking,
                                     "answer": answer,
                                     "model": model,
+                                    "search_results": search_results,
                                     "full_response": data
                                 }
                         
-                        # If no patterns match, split the content roughly in half as a fallback
-                        # This isn't ideal but provides some thinking content
+                        # If no patterns match, try to split at clear answer section headings
+                        content_splits = re.split(r'\n\n---\n\n|\n---\n|\n\n#|📝 Answer:', content)
+                        if len(content_splits) > 1:
+                            # Use everything before first split as thinking
+                            thinking = content_splits[0].strip()
+                            # Use everything after as answer
+                            answer = "\n\n".join(content_splits[1:]).strip()
+                            
+                            return {
+                                "success": True,
+                                "thinking": thinking,
+                                "answer": answer,
+                                "model": model,
+                                "search_results": search_results,
+                                "full_response": data
+                            }
+                            
+                        # Last resort: look for numbered list items followed by answer
+                        match = re.search(r'(\d+)\.\s+(.*?)(?=\n\n📝\s+Answer:|\n📝\s+Answer:)', content, re.DOTALL)
+                        if match:
+                            # Find where the numbered thinking ends and the answer begins
+                            answer_start = content.find("📝 Answer:")
+                            if answer_start > 0:
+                                thinking = content[:answer_start].strip()
+                                answer = content[answer_start + len("📝 Answer:"):].strip()
+                                
+                                return {
+                                    "success": True,
+                                    "thinking": thinking,
+                                    "answer": answer, 
+                                    "model": model,
+                                    "search_results": search_results,
+                                    "full_response": data
+                                }
+                                
+                        # If still no match, split the content roughly in half as a fallback
                         content_parts = content.split("\n\n")
                         if len(content_parts) > 2:
                             # Use first half as thinking, second half as answer
@@ -253,6 +322,7 @@ class PerplexityAPI:
                                 "thinking": thinking,
                                 "answer": answer,
                                 "model": model,
+                                "search_results": search_results,
                                 "full_response": data
                             }
                 
@@ -261,6 +331,7 @@ class PerplexityAPI:
                     "success": True,
                     "answer": content,
                     "model": model,
+                    "search_results": search_results,
                     "full_response": data
                 }
                 

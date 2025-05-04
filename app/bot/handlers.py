@@ -2,7 +2,7 @@ import logging
 import json
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import asyncio
 from io import BytesIO
 
@@ -706,6 +706,38 @@ def sanitize_text(text):
     
     return text
 
+def extract_references(text: str, search_results: List[Dict[str, Any]] = None) -> Tuple[str, str]:
+    """
+    Extract reference links from text and return cleaned text and references.
+    
+    Args:
+        text: The text to process
+        search_results: Optional search results with sources
+        
+    Returns:
+        Tuple of (cleaned_text, reference_links)
+    """
+    # If no search results, return original text
+    if not search_results:
+        return text, ""
+    
+    # Look for references in numbered format like (1)(2)(3)
+    reference_pattern = r'\(\d+\)'
+    has_references = bool(re.search(reference_pattern, text))
+    
+    if has_references and search_results:
+        # Format the references
+        references = "Source links:\n"
+        for i, result in enumerate(search_results[:10], 1):  # Limit to top 10 sources
+            title = result.get("title", "Source")
+            url = result.get("url", "#")
+            references += f"{i}. {title}: {url}\n"
+        
+        return text, references
+    
+    # No references found or no search results
+    return text, ""
+
 async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     """Handle a regular message (question/query)."""
     # Send typing action
@@ -782,8 +814,17 @@ async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_T
                     
                     # Then send the answer, also sanitized
                     answer = sanitize_text(response["answer"])
+                    
+                    # Extract any references
+                    cleaned_answer, references = extract_references(answer, response.get("search_results"))
+                    
+                    # Send the main answer
                     await update.message.reply_text("📝 Answer:")
-                    await split_and_send_long_message(update, answer)
+                    await split_and_send_long_message(update, cleaned_answer)
+                    
+                    # Add references if any
+                    if references:
+                        await update.message.reply_text(f"📚 *Sources*:\n{references}")
                     
                     # Save assistant's message
                     await save_message(
@@ -800,7 +841,16 @@ async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_T
                 else:
                     # Send the answer without any parse mode first
                     answer = sanitize_text(response["answer"])
-                    await split_and_send_long_message(update, answer)
+                    
+                    # Extract any references
+                    cleaned_answer, references = extract_references(answer, response.get("search_results"))
+                    
+                    # Send the main answer
+                    await split_and_send_long_message(update, cleaned_answer)
+                    
+                    # Add references if any
+                    if references:
+                        await update.message.reply_text(f"📚 *Sources*:\n{references}")
                     
                     # Save assistant's message
                     await save_message(
@@ -951,8 +1001,17 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     
                     # Then send the answer, also sanitized
                     answer = sanitize_text(response["answer"])
+                    
+                    # Extract any references
+                    cleaned_answer, references = extract_references(answer, response.get("search_results"))
+                    
+                    # Send the main answer
                     await update.message.reply_text("📝 Answer:")
-                    await split_and_send_long_message(update, answer)
+                    await split_and_send_long_message(update, cleaned_answer)
+                    
+                    # Add references if any
+                    if references:
+                        await update.message.reply_text(f"📚 *Sources*:\n{references}")
                     
                     # Save assistant's message
                     await save_message(
@@ -969,7 +1028,16 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 else:
                     # Send the answer without any parse mode first
                     answer = sanitize_text(response["answer"])
-                    await split_and_send_long_message(update, answer)
+                    
+                    # Extract any references
+                    cleaned_answer, references = extract_references(answer, response.get("search_results"))
+                    
+                    # Send the main answer
+                    await split_and_send_long_message(update, cleaned_answer)
+                    
+                    # Add references if any
+                    if references:
+                        await update.message.reply_text(f"📚 *Sources*:\n{references}")
                     
                     # Save assistant's message
                     await save_message(
