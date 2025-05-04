@@ -11,6 +11,7 @@ from db.database import get_db, init_db
 from api.perplexity import PerplexityAPI
 from models.user import User
 from scheduler.reminder import setup_scheduler
+from scheduler.news_scheduler import setup_news_scheduler
 from bot.handlers import setup_handlers
 
 # Load environment variables
@@ -46,9 +47,14 @@ bot_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 perplexity_api = PerplexityAPI(PERPLEXITY_API_KEY)
 
 # Setup scheduler for reminders
-scheduler = setup_scheduler(bot_app)
+reminder_scheduler = setup_scheduler(bot_app)
 # Store scheduler in bot_data so it can be accessed by handlers
-bot_app.bot_data["reminder_scheduler"] = scheduler
+bot_app.bot_data["reminder_scheduler"] = reminder_scheduler
+
+# Setup scheduler for news updates
+news_scheduler = setup_news_scheduler(bot_app.bot, perplexity_api)
+# Store news scheduler in bot_data
+bot_app.bot_data["news_scheduler"] = news_scheduler
 
 # Setup handlers
 setup_handlers(bot_app, perplexity_api)
@@ -57,7 +63,8 @@ setup_handlers(bot_app, perplexity_api)
 async def startup_event():
     """Initialize database and start scheduler on startup."""
     await init_db()
-    scheduler.start()
+    reminder_scheduler.start()
+    news_scheduler.start()
     
     # Set webhook for telegram bot if WEBHOOK_URL is provided
     if WEBHOOK_URL:
@@ -79,7 +86,8 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Shutdown scheduler on application shutdown."""
-    scheduler.shutdown()
+    reminder_scheduler.shutdown()
+    news_scheduler.shutdown()
     if WEBHOOK_URL:
         await bot_app.bot.delete_webhook()
     else:

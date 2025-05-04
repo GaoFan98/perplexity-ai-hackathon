@@ -310,27 +310,20 @@ def create_thinking_mode_keyboard(current_mode: bool) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 def create_settings_keyboard() -> InlineKeyboardMarkup:
-    """
-    Create keyboard markup for settings menu.
-    
-    Returns:
-        InlineKeyboardMarkup with settings options
-    """
+    """Create keyboard buttons for settings menu."""
     keyboard = [
         [
-            InlineKeyboardButton("Change Model 🔄", callback_data="change_model")
+            InlineKeyboardButton("Change Model 🤖", callback_data="change_model"),
+            InlineKeyboardButton("Thinking Mode 🧠", callback_data="thinking_settings")
         ],
         [
-            InlineKeyboardButton("Thinking Mode ⚙️", callback_data="thinking_settings")
+            InlineKeyboardButton("Manage Reminders 🔔", callback_data="manage_reminders"),
+            InlineKeyboardButton("News Subscriptions 📰", callback_data="manage_subscriptions")
         ],
         [
-            InlineKeyboardButton("Manage Reminders 🔔", callback_data="manage_reminders")
-        ],
-        [
-            InlineKeyboardButton("Clear Chat History 🗑️", callback_data="clear_history")
+            InlineKeyboardButton("Clear History 🗑️", callback_data="clear_history")
         ]
     ]
-    
     return InlineKeyboardMarkup(keyboard)
 
 def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
@@ -623,4 +616,33 @@ def extract_reminder_text(text: str) -> str:
     
     cleaned_text = cleaned_text.strip()
     
-    return cleaned_text if cleaned_text else "Reminder" 
+    return cleaned_text if cleaned_text else "Reminder"
+
+def create_frequency_keyboard():
+    """Create an inline keyboard for selecting news frequency."""
+    keyboard = [
+        [
+            InlineKeyboardButton("Hourly ⏰", callback_data="freq_hourly"),
+            InlineKeyboardButton("Daily 📅", callback_data="freq_daily"),
+        ],
+        [
+            InlineKeyboardButton("Weekly 📆", callback_data="freq_weekly"),
+            InlineKeyboardButton("Cancel ❌", callback_data="freq_cancel"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def create_subscription_keyboard(subscriptions):
+    """Create an inline keyboard for managing topic subscriptions."""
+    keyboard = []
+    
+    for sub in subscriptions:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🗑️ {sub.topic} ({sub.frequency})", 
+                callback_data=f"unsub_{sub.id}"
+            )
+        ])
+    
+    keyboard.append([InlineKeyboardButton("Back to Settings ⬅️", callback_data="settings")])
+    return InlineKeyboardMarkup(keyboard) 

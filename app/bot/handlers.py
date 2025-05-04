@@ -25,15 +25,20 @@ from bot.utils import (
     update_conversation_history, create_model_selection_keyboard,
     create_thinking_mode_keyboard, create_settings_keyboard,
     parse_reminder_time, parse_recurrence_pattern, 
-    is_image_request, is_reminder_request, extract_reminder_text
+    is_image_request, is_reminder_request, extract_reminder_text,
+    create_frequency_keyboard, create_subscription_keyboard
 )
+from services.news_service import NewsService
+from models.topic_subscription import TopicSubscription
 
 logger = logging.getLogger(__name__)
 
 # Conversation states
 (
     AWAITING_REMINDER_CONFIRMATION,
-) = range(1)
+    AWAITING_PDF_QUESTION,
+    AWAITING_TOPIC_FREQUENCY,
+) = range(3)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /start command."""
@@ -77,6 +82,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/thinking - Toggle thinking mode\n"
         "/reminder - Set a new reminder\n"
         "/list_reminders - List your active reminders\n"
+        "/subscribe TOPIC - Subscribe to news on a topic\n"
+        "/mysubs - List your news subscriptions\n"
         "/clear - Clear conversation history\n"
         "/help - Show this help message\n\n"
         
@@ -84,11 +91,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🔍 *Web Search* - Ask any question to search the web\n"
         "🧠 *Thinking Mode* - See the AI's reasoning process\n"
         "🔔 *Reminders* - Set one-time or recurring reminders\n"
+        "📰 *News Updates* - Get regular updates on your topics of interest\n"
         "🖼️ *Image Analysis* - Send an image with a question\n\n"
         
         "*Setting Reminders:*\n"
         "- One-time: 'Remind me to call mom tomorrow at 5:00 PM'\n"
         "- Recurring: 'Remind me to check email every day at 9:00 AM'\n\n"
+        
+        "*News Subscriptions:*\n"
+        "- Use `/subscribe AI` to follow a topic (replace AI with any topic)\n"
+        "- Choose hourly, daily, or weekly updates\n"
+        "- Get breaking news delivered automatically\n\n"
         
         "*Models:*\n"
         "- Sonar Pro - Fast search with grounding\n"
@@ -441,6 +454,106 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
                 "❌ Reminder cancelled."
             )
             return ConversationHandler.END
+            
+        # Handle frequency selection
+        elif data.startswith("freq_"):
+            frequency = data.replace("freq_", "")
+            
+            if frequency == "cancel":
+                await query.edit_message_text(
+                    "❌ Subscription cancelled."
+                )
+                return ConversationHandler.END
+            
+            # Get the stored topic
+            topic = context.user_data.get("pending_topic")
+            if not topic:
+                await query.edit_message_text(
+                    "❌ Topic not found. Please try subscribing again."
+                )
+                return ConversationHandler.END
+            
+            # Get news service
+            news_service = context.bot_data.get("news_service")
+            if not news_service:
+                perplexity_api = context.bot_data.get("perplexity_api")
+                news_service = NewsService(perplexity_api)
+            
+            # Subscribe to topic
+            subscription = await news_service.subscribe_to_topic(
+                session=session,
+                user_id=user.id,
+                topic=topic,
+                frequency=frequency
+            )
+            
+            # Confirmation message
+            frequency_text = {
+                "hourly": "every hour",
+                "daily": "once a day",
+                "weekly": "once a week"
+            }.get(frequency, frequency)
+            
+            await query.edit_message_text(
+                f"✅ You are now subscribed to news updates about *{topic}*.\n\n"
+                f"You will receive updates {frequency_text}.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Clean up
+            context.user_data.pop("pending_topic", None)
+            
+            return ConversationHandler.END
+            
+        # Handle unsubscribe
+        elif data.startswith("unsub_"):
+            try:
+                # Extract subscription ID
+                sub_id = int(data.replace("unsub_", ""))
+                
+                # Get news service
+                news_service = context.bot_data.get("news_service")
+                if not news_service:
+                    perplexity_api = context.bot_data.get("perplexity_api")
+                    news_service = NewsService(perplexity_api)
+                
+                # Unsubscribe
+                success = await news_service.unsubscribe_from_topic(
+                    session=session,
+                    user_id=user.id,
+                    topic_id=sub_id
+                )
+                
+                if success:
+                    await query.edit_message_text(
+                        "✅ You have unsubscribed from this topic."
+                    )
+                    # Wait a moment then reload the subscriptions list
+                    await asyncio.sleep(1)
+                    await query.edit_message_text("Refreshing subscriptions...")
+                    
+                    # Simulate the command
+                    await list_subscriptions_command(update, context)
+                else:
+                    await query.edit_message_text(
+                        "❌ Subscription not found or already deleted."
+                    )
+            except ValueError:
+                await query.edit_message_text(
+                    "❌ Invalid subscription ID format."
+                )
+            return None
+            
+        # Handle manage subscriptions from settings
+        elif data == "manage_subscriptions":
+            # Trigger the list_subscriptions_command
+            await query.edit_message_text(
+                "Loading your subscriptions..."
+            )
+            
+            # Simulate the command
+            await list_subscriptions_command(update, context)
+            return None
     
     return None
 
@@ -1037,9 +1150,116 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         # Save updated conversation history
         await session.commit()
 
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle the /subscribe command to subscribe to news topics."""
+    # Check if a topic was provided in the command
+    if context.args and len(context.args) > 0:
+        # Join all args to form the topic
+        topic = " ".join(context.args)
+        
+        # Store the topic in user data
+        context.user_data["pending_topic"] = topic
+        
+        # Ask for frequency directly
+        await update.message.reply_text(
+            f"📊 How often would you like to receive updates about *{topic}*?",
+            reply_markup=create_frequency_keyboard(),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return AWAITING_TOPIC_FREQUENCY
+    else:
+        # No topic provided, show usage instructions
+        await update.message.reply_text(
+            "📰 *Subscribe to News Updates*\n\n"
+            "Please use the format: `/subscribe TOPIC`\n\n"
+            "Examples:\n"
+            "- `/subscribe AI`\n"
+            "- `/subscribe climate change`\n"
+            "- `/subscribe space exploration`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        return ConversationHandler.END
+
+async def handle_news_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle the topic for news subscription."""
+    topic = update.message.text.strip()
+    
+    # Store the topic in user data
+    context.user_data["pending_topic"] = topic
+    
+    await update.message.reply_text(
+        f"📊 How often would you like to receive updates about *{topic}*?",
+        reply_markup=create_frequency_keyboard(),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    return AWAITING_TOPIC_FREQUENCY
+
+async def list_subscriptions_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /mysubs command to list user's news subscriptions."""
+    async with async_session() as session:
+        user = await get_or_create_user(session, update)
+        
+        # Get news service
+        news_service = context.bot_data.get("news_service")
+        if not news_service:
+            perplexity_api = context.bot_data.get("perplexity_api")
+            news_service = NewsService(perplexity_api)
+        
+        # Get subscriptions
+        subscriptions = await news_service.get_user_subscriptions(session, user.id)
+        
+        # Determine if this is from a callback query or direct command
+        is_callback = update.callback_query is not None
+        
+        if not subscriptions:
+            message_text = "You don't have any active news subscriptions."
+            if is_callback:
+                await update.callback_query.message.edit_text(
+                    message_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text(
+                    message_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            return
+        
+        # Format subscriptions list
+        subs_text = "📰 *Your News Subscriptions:*\n\n"
+        
+        for i, sub in enumerate(subscriptions, 1):
+            subs_text += f"{i}. *{sub.topic}*\n   📊 Frequency: {sub.frequency}\n\n"
+        
+        subs_text += "Click on a subscription to unsubscribe."
+        
+        # Create keyboard
+        reply_markup = create_subscription_keyboard(subscriptions)
+        
+        # Send the message based on update type
+        if is_callback:
+            await update.callback_query.message.edit_text(
+                subs_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text(
+                subs_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.MARKDOWN
+            )
+
 def setup_handlers(bot_app: Application, perplexity_api: PerplexityAPI) -> None:
     """Set up all handlers for the bot."""
     bot_app.bot_data["perplexity_api"] = perplexity_api
+    
+    # Initialize news service
+    news_service = NewsService(perplexity_api)
+    bot_app.bot_data["news_service"] = news_service
     
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("help", help_command))
@@ -1049,9 +1269,12 @@ def setup_handlers(bot_app: Application, perplexity_api: PerplexityAPI) -> None:
     bot_app.add_handler(CommandHandler("clear", clear_command))
     bot_app.add_handler(CommandHandler("reminder", reminder_command))
     bot_app.add_handler(CommandHandler("list_reminders", list_reminders_command))
+    bot_app.add_handler(CommandHandler("subscribe", subscribe_command))
+    bot_app.add_handler(CommandHandler("mysubs", list_subscriptions_command))
     
     bot_app.add_handler(CallbackQueryHandler(callback_query_handler))
     
+    # Add conversation handler for reminders
     reminder_handler = ConversationHandler(
         entry_points=[],
         states={
@@ -1063,6 +1286,20 @@ def setup_handlers(bot_app: Application, perplexity_api: PerplexityAPI) -> None:
     )
     bot_app.add_handler(reminder_handler)
     
+    # Add conversation handler for news subscriptions
+    news_subscription_handler = ConversationHandler(
+        entry_points=[CommandHandler("subscribe", subscribe_command)],
+        states={
+            AWAITING_TOPIC_FREQUENCY: [
+                CallbackQueryHandler(callback_query_handler, pattern=r"^freq_")
+            ],
+        },
+        fallbacks=[],
+        name="news_subscription_conversation"
+    )
+    bot_app.add_handler(news_subscription_handler)
+    
+    # Add other message handlers last
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
@@ -1073,6 +1310,8 @@ def setup_handlers(bot_app: Application, perplexity_api: PerplexityAPI) -> None:
         BotCommand("thinking", "Toggle thinking mode"),
         BotCommand("reminder", "Set a new reminder"),
         BotCommand("list_reminders", "List active reminders"),
+        BotCommand("subscribe", "Subscribe to news updates"),
+        BotCommand("mysubs", "List news subscriptions"),
         BotCommand("clear", "Clear conversation history"),
         BotCommand("help", "Show help message")
     ]))
