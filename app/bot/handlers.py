@@ -657,15 +657,22 @@ async def split_and_send_long_message(update: Update, text: str, parse_mode=None
     if current_chunk:
         chunks.append(current_chunk)
     
+    # Delete the loading message
+    try:
+        await context.bot.delete_message(
+            chat_id=update.message.chat_id,
+            message_id=loading_message.message_id
+        )
+    except Exception as e:
+        logger.error(f"Error deleting loading message: {str(e)}")
+    
     # Send each chunk as a separate message
     for chunk in chunks:
         try:
             await update.message.reply_text(chunk)
         except Exception as e:
             logger.error(f"Error sending message chunk: {str(e)}")
-            # Try sending without parse mode if parsing fails
             try:
-                # Remove any characters that might cause formatting issues
                 clean_text = ''.join(c for c in chunk if c.isalnum() or c.isspace() or c in ',.?!:;()[]{}')
                 await update.message.reply_text(clean_text)
             except Exception as inner_e:
@@ -740,16 +747,13 @@ def extract_references(text: str, search_results: List[Dict[str, Any]] = None) -
 
 async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
     """Handle a regular message (question/query)."""
-    # Send typing action
     await update.message.chat.send_action(action="typing")
     
-    # Send a loading indicator message that we'll update later
     loading_message = await update.message.reply_text("🧠 Processing your request... This might take a moment.")
     
     async with async_session() as session:
         user = await get_or_create_user(session, update)
         
-        # Save user's message
         await save_message(
             session,
             user,
@@ -758,21 +762,16 @@ async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_T
             message_id=update.message.message_id
         )
         
-        # Get user preferences
         model = user.preferred_model
         thinking_mode = user.thinking_mode
         
-        # Use the properly formatted conversation history
         conversation_history = get_conversation_history(user)
         
-        # Process with Perplexity API
         perplexity_api = context.bot_data.get("perplexity_api")
         
-        # Keep the typing indicator active during processing
         typing_task = asyncio.create_task(keep_typing_indicator(update))
         
         try:
-            # Call API
             response = await perplexity_api.ask_question(
                 query=text,
                 model=model,
@@ -780,10 +779,8 @@ async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_T
                 show_thinking=thinking_mode
             )
             
-            # Cancel the typing indicator
             typing_task.cancel()
             
-            # Delete the loading message
             try:
                 await context.bot.delete_message(
                     chat_id=update.message.chat_id,
@@ -792,19 +789,14 @@ async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_T
             except Exception as e:
                 logger.error(f"Error deleting loading message: {str(e)}")
             
-            # Handle API response
             if response.get("success"):
-                # Update conversation history
                 update_conversation_history(user, "user", text)
                 
                 if thinking_mode and "thinking" in response:
-                    # Get the thinking text and sanitize it
                     thinking_text = sanitize_text(response['thinking'])
                     
-                    # Add a simple header
                     await update.message.reply_text("🧠 Thinking Process:", reply_to_message_id=update.message.message_id)
                     
-                    # Break thinking text into chunks if needed
                     if len(thinking_text) > 4000:
                         chunks = [thinking_text[i:i+4000] for i in range(0, len(thinking_text), 4000)]
                         for chunk in chunks:
@@ -812,21 +804,16 @@ async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_T
                     else:
                         await update.message.reply_text(thinking_text)
                     
-                    # Then send the answer, also sanitized
                     answer = sanitize_text(response["answer"])
                     
-                    # Extract any references
                     cleaned_answer, references = extract_references(answer, response.get("search_results"))
                     
-                    # Send the main answer
                     await update.message.reply_text("📝 Answer:")
                     await split_and_send_long_message(update, cleaned_answer)
                     
-                    # Add references if any
                     if references:
                         await update.message.reply_text(f"📚 *Sources*:\n{references}")
                     
-                    # Save assistant's message
                     await save_message(
                         session,
                         user,
@@ -836,23 +823,17 @@ async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_T
                         include_thinking=True
                     )
                     
-                    # Update conversation history with just the answer
                     update_conversation_history(user, "assistant", answer)
                 else:
-                    # Send the answer without any parse mode first
                     answer = sanitize_text(response["answer"])
                     
-                    # Extract any references
                     cleaned_answer, references = extract_references(answer, response.get("search_results"))
                     
-                    # Send the main answer
                     await split_and_send_long_message(update, cleaned_answer)
                     
-                    # Add references if any
                     if references:
                         await update.message.reply_text(f"📚 *Sources*:\n{references}")
                     
-                    # Save assistant's message
                     await save_message(
                         session,
                         user,
@@ -861,7 +842,6 @@ async def handle_regular_message(update: Update, context: ContextTypes.DEFAULT_T
                         model_used=model
                     )
                     
-                    # Update conversation history
                     update_conversation_history(user, "assistant", answer)
             else:
                 # Handle error
@@ -916,49 +896,38 @@ async def keep_typing_indicator(update: Update):
 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle messages with photos."""
-    # Get the photo file
-    photo = update.message.photo[-1]  # Get the largest photo
-    
-    # Get the caption if any
-    caption = update.message.caption or "Describe this image"
-    
-    # Send typing action
     await update.message.chat.send_action(action="typing")
     
-    # Send a loading indicator message that we'll update later
     loading_message = await update.message.reply_text("🧠 Processing your image... This might take a moment.")
     
     async with async_session() as session:
         user = await get_or_create_user(session, update)
         
-        # Get file from Telegram
+        model = user.preferred_model
+        thinking_mode = user.thinking_mode
+        
+        conversation_history = get_conversation_history(user)
+        
+        photo = update.message.photo[-1]
         photo_file = await context.bot.get_file(photo.file_id)
         photo_bytes = await photo_file.download_as_bytearray()
         
-        # Save user's message
+        caption = update.message.caption or "What's in this image?"
+        
         await save_message(
             session,
             user,
             "user",
-            f"[Image with caption: {caption}]",
-            message_id=update.message.message_id
+            f"[Image] {caption}",
+            message_id=update.message.message_id,
+            has_image=True
         )
         
-        # Get user preferences
-        model = user.preferred_model
-        thinking_mode = user.thinking_mode
-        
-        # Get conversation history - now properly formatted
-        conversation_history = get_conversation_history(user)
-        
-        # Process with Perplexity API
         perplexity_api = context.bot_data.get("perplexity_api")
         
-        # Keep the typing indicator active during processing
         typing_task = asyncio.create_task(keep_typing_indicator(update))
         
         try:
-            # Call API with image
             response = await perplexity_api.ask_question(
                 query=caption,
                 model=model,
@@ -967,10 +936,8 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 image_data=photo_bytes
             )
             
-            # Cancel the typing indicator
             typing_task.cancel()
             
-            # Delete the loading message
             try:
                 await context.bot.delete_message(
                     chat_id=update.message.chat_id,
@@ -979,19 +946,14 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
             except Exception as e:
                 logger.error(f"Error deleting loading message: {str(e)}")
             
-            # Handle API response
             if response.get("success"):
-                # Update conversation history
                 update_conversation_history(user, "user", caption)
                 
                 if thinking_mode and "thinking" in response:
-                    # Get the thinking text and sanitize it
                     thinking_text = sanitize_text(response['thinking'])
                     
-                    # Add a simple header
                     await update.message.reply_text("🧠 Thinking Process:", reply_to_message_id=update.message.message_id)
                     
-                    # Break thinking text into chunks if needed
                     if len(thinking_text) > 4000:
                         chunks = [thinking_text[i:i+4000] for i in range(0, len(thinking_text), 4000)]
                         for chunk in chunks:
@@ -999,21 +961,16 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     else:
                         await update.message.reply_text(thinking_text)
                     
-                    # Then send the answer, also sanitized
                     answer = sanitize_text(response["answer"])
                     
-                    # Extract any references
                     cleaned_answer, references = extract_references(answer, response.get("search_results"))
                     
-                    # Send the main answer
                     await update.message.reply_text("📝 Answer:")
                     await split_and_send_long_message(update, cleaned_answer)
                     
-                    # Add references if any
                     if references:
                         await update.message.reply_text(f"📚 *Sources*:\n{references}")
                     
-                    # Save assistant's message
                     await save_message(
                         session,
                         user,
@@ -1023,23 +980,17 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         include_thinking=True
                     )
                     
-                    # Update conversation history with just the answer
                     update_conversation_history(user, "assistant", answer)
                 else:
-                    # Send the answer without any parse mode first
                     answer = sanitize_text(response["answer"])
                     
-                    # Extract any references
                     cleaned_answer, references = extract_references(answer, response.get("search_results"))
                     
-                    # Send the main answer
                     await split_and_send_long_message(update, cleaned_answer)
                     
-                    # Add references if any
                     if references:
                         await update.message.reply_text(f"📚 *Sources*:\n{references}")
                     
-                    # Save assistant's message
                     await save_message(
                         session,
                         user,
@@ -1048,7 +999,6 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         model_used=model
                     )
                     
-                    # Update conversation history
                     update_conversation_history(user, "assistant", answer)
             else:
                 # Handle error
@@ -1089,10 +1039,8 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 def setup_handlers(bot_app: Application, perplexity_api: PerplexityAPI) -> None:
     """Set up all handlers for the bot."""
-    # Store Perplexity API in context
     bot_app.bot_data["perplexity_api"] = perplexity_api
     
-    # Add command handlers
     bot_app.add_handler(CommandHandler("start", start_command))
     bot_app.add_handler(CommandHandler("help", help_command))
     bot_app.add_handler(CommandHandler("settings", settings_command))
@@ -1102,12 +1050,10 @@ def setup_handlers(bot_app: Application, perplexity_api: PerplexityAPI) -> None:
     bot_app.add_handler(CommandHandler("reminder", reminder_command))
     bot_app.add_handler(CommandHandler("list_reminders", list_reminders_command))
     
-    # Add callback query handler
     bot_app.add_handler(CallbackQueryHandler(callback_query_handler))
     
-    # Add conversation handler for reminders
     reminder_handler = ConversationHandler(
-        entry_points=[],  # Entry points are handled in handle_message
+        entry_points=[],
         states={
             AWAITING_REMINDER_CONFIRMATION: [
                 CallbackQueryHandler(callback_query_handler, pattern=r"^reminder_")
@@ -1117,11 +1063,9 @@ def setup_handlers(bot_app: Application, perplexity_api: PerplexityAPI) -> None:
     )
     bot_app.add_handler(reminder_handler)
     
-    # Add message handlers
     bot_app.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Set bot commands for menu
     asyncio.create_task(bot_app.bot.set_my_commands([
         BotCommand("start", "Start the bot"),
         BotCommand("settings", "Open settings menu"),

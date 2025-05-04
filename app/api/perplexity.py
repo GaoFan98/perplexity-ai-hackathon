@@ -55,20 +55,15 @@ class PerplexityAPI:
         """
         model = model or self.default_model
         
-        # For reasoning models, switch to reasoning model if thinking is enabled
         if show_thinking and not "reasoning" in model:
-            # If not already a reasoning model, switch to an appropriate one
             if model == "sonar-pro":
                 model = "sonar-reasoning-pro"
             elif model == "sonar":
                 model = "sonar-reasoning"
             logger.info(f"Thinking mode enabled: switched model from {model} to reasoning variant")
         
-        # Prepare messages
         messages = []
         
-        # Add system prompt
-        # For reasoning models, add instructions to use <think> tags when thinking mode is enabled
         if show_thinking and "reasoning" in model:
             enhanced_prompt = (
                 f"{system_prompt}\n\n"
@@ -87,9 +82,7 @@ class PerplexityAPI:
                 "content": system_prompt
             })
         
-        # Add conversation history if provided
         if conversation_history:
-            # Skip the first message if it's a system message to avoid duplication
             history_to_add = conversation_history
             if (conversation_history and len(conversation_history) > 0 and 
                 conversation_history[0].get("role") == "system"):
@@ -97,12 +90,9 @@ class PerplexityAPI:
                 
             messages.extend(history_to_add)
         
-        # Prepare user message with text and optional image
         if image_data:
-            # Convert image to base64
             base64_image = self._encode_image(image_data)
             
-            # Create content array with text and image
             content = [
                 {"type": "text", "text": query},
                 {
@@ -118,31 +108,25 @@ class PerplexityAPI:
                 "content": content
             })
         else:
-            # Simple text-only message
             messages.append({
                 "role": "user",
                 "content": query
             })
         
-        # Prepare payload
         payload = {
             "model": model,
             "messages": messages,
             "temperature": temperature
         }
         
-        # Configure web search options
         web_search_options = {}
         
-        # Add search context size if provided
         if search_context_size and search_context_size in ["low", "medium", "high"]:
             web_search_options["search_context_size"] = search_context_size
         
-        # Add web_search_options to payload if not empty
         if web_search_options:
             payload["web_search_options"] = web_search_options
         
-        # Add optional parameters if provided
         if search_domain_filter:
             payload["search_domain_filter"] = search_domain_filter
             
@@ -153,10 +137,8 @@ class PerplexityAPI:
         
         try:
             async with httpx.AsyncClient() as client:
-                # Log the request payload for debugging (without sensitive info)
                 debug_payload = payload.copy()
                 if "messages" in debug_payload:
-                    # Truncate message content for logging
                     debug_payload["messages"] = f"{len(debug_payload['messages'])} messages"
                 logger.debug(f"Sending request to Perplexity API: {model} - {debug_payload}")
                 
@@ -164,7 +146,7 @@ class PerplexityAPI:
                     url, 
                     headers=self.headers, 
                     json=payload,
-                    timeout=90.0  # Longer timeout for deep research
+                    timeout=90.0
                 )
                 
                 if response.status_code != 200:
@@ -174,12 +156,10 @@ class PerplexityAPI:
                         if "error" in error_json and "message" in error_json["error"]:
                             error_message = error_json["error"]["message"]
                     except:
-                        # If we can't parse the JSON, use the raw text
                         pass
                         
                     logger.error(f"Error from Perplexity API: {response.status_code} - {error_message}")
                     
-                    # Log message structure for debugging
                     if "After the (optional) system message(s), user and assistant roles should be alternating" in response.text:
                         roles = [m.get("role", "unknown") for m in messages]
                         logger.error(f"Message role sequence: {roles}")
@@ -191,34 +171,24 @@ class PerplexityAPI:
                 
                 data = response.json()
                 
-                # Extract response content
                 content = data["choices"][0]["message"]["content"]
                 
-                # Check if there are search results with links
                 search_results = None
                 if "search_results" in data.get("choices", [{}])[0].get("message", {}).get("metadata", {}):
                     search_results = data["choices"][0]["message"]["metadata"]["search_results"]
                 
-                # Clean up any tags at the beginning and in content
-                # Remove assistant tags
                 content = re.sub(r'^(&amp;lt;｜Assistant｜&amp;gt;|<｜Assistant｜>)', '', content).strip()
                 
-                # Replace encoded entities with their actual characters
                 content = content.replace('&amp;lt;', '<').replace('&amp;gt;', '>')
                 
-                # Remove raw <think> tags if they appear as plain text
                 content = re.sub(r'&lt;think&gt;|<think>|&amp;lt;think&amp;gt;', '', content)
                 content = re.sub(r'&lt;/think&gt;|</think>|&amp;lt;/think&amp;gt;', '', content)
                 
-                # Remove all other encoded HTML tags that may appear
                 content = re.sub(r'&lt;[^&]*&gt;|&amp;lt;[^&]*&amp;gt;', '', content)
                 
-                # For reasoning models, extract thinking and final answer if show_thinking is enabled
                 if show_thinking:
-                    # Check if the content has a clear "thinking" and "answer" section with emojis or specific headers
                     emoji_sections = re.split(r'(🧠 Thinking Process:|📝 Answer:)', content)
                     if len(emoji_sections) >= 3:
-                        # Find thinking and answer sections based on emojis
                         thinking_start = -1
                         answer_start = -1
                         
@@ -229,10 +199,8 @@ class PerplexityAPI:
                                 answer_start = i
                         
                         if thinking_start >= 0 and answer_start > thinking_start:
-                            # Extract thinking content (everything between thinking emoji and answer emoji)
                             thinking_content = "".join(emoji_sections[thinking_start+1:answer_start]).strip()
                             
-                            # Extract answer content (everything after answer emoji)
                             answer_content = "".join(emoji_sections[answer_start+1:]).strip()
                             
                             return {
@@ -244,14 +212,11 @@ class PerplexityAPI:
                                 "full_response": data
                             }
                     
-                    # Try to extract thinking content using <think> tags
                     if "<think>" in content and "</think>" in content:
-                        # Extract content between <think> tags
                         think_start = content.find("<think>") + len("<think>")
                         think_end = content.find("</think>")
                         thinking = content[think_start:think_end].strip()
                         
-                        # Extract content after </think>
                         answer = content[think_end + len("</think>"):].strip()
                         
                         return {
@@ -263,7 +228,6 @@ class PerplexityAPI:
                             "full_response": data
                         }
                 
-                # If we didn't return thinking/answer above, return the full content as answer
                 return {
                     "success": True,
                     "answer": content,
@@ -300,8 +264,6 @@ class PerplexityAPI:
         """
         logger.info(f"Image generation requested for prompt: {prompt}")
         
-        # For now, we'll return a mock response
-        # In a real implementation, we would integrate with a service like DALL-E or Stable Diffusion
         return {
             "success": False,
             "error": "Image generation is not supported by Perplexity API. Please integrate with a dedicated image generation service."
@@ -318,31 +280,24 @@ class PerplexityAPI:
             Base64 encoded string
         """
         try:
-            # Open image with Pillow
             img = Image.open(BytesIO(image_data))
             
-            # Check file size
             img_byte_arr = BytesIO()
             img.save(img_byte_arr, format=img.format or 'JPEG')
             file_size = img_byte_arr.tell()
             
-            # If image is too large, compress it
-            if file_size > 4 * 1024 * 1024:  # 4MB
-                # Calculate new size to maintain aspect ratio
+            if file_size > 4 * 1024 * 1024:
                 width, height = img.size
                 ratio = min(1000 / width, 1000 / height)
                 new_size = (int(width * ratio), int(height * ratio))
                 
-                # Resize image
                 img = img.resize(new_size, Image.LANCZOS)
                 
-                # Save as JPEG with compression
                 img_byte_arr = BytesIO()
                 img.save(img_byte_arr, format='JPEG', quality=85)
                 img_byte_arr.seek(0)
                 image_data = img_byte_arr.read()
             
-            # Encode to base64
             base64_str = base64.b64encode(image_data).decode('utf-8')
             return base64_str
             

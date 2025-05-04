@@ -33,6 +33,7 @@ DATETIME_FORMATS = [
     r'(\d{1,2}):(\d{2})',
     
     # Relative time
+    r'in (\d+) seconds?',
     r'in (\d+) minutes?',
     r'in (\d+) hours?',
     r'in (\d+) days?',
@@ -79,18 +80,15 @@ async def get_or_create_user(session: AsyncSession, update: Update) -> User:
     Returns:
         User object
     """
-    # Get user info from telegram update
     tg_user = update.effective_user
     if not tg_user:
         raise ValueError("No user in update")
     
-    # Look for existing user
     result = await session.execute(
         select(User).where(User.telegram_id == tg_user.id)
     )
     user = result.scalars().first()
     
-    # Create new user if not found
     if not user:
         user = User(
             telegram_id=tg_user.id,
@@ -345,16 +343,13 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
     Returns:
         Tuple of (scheduled_time, error_message)
     """
-    # Current time as base
     now = datetime.now(timezone.utc)
     
-    # Try each format
     for pattern in DATETIME_FORMATS:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             groups = match.groups()
             
-            # Date and time with 12h clock
             if pattern == DATETIME_FORMATS[0] or pattern == DATETIME_FORMATS[1]:
                 day, month, year, hour, minute, ampm = groups
                 year = int("20" + year if len(year) == 2 else year)
@@ -369,7 +364,6 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
                 except ValueError:
                     return None, "Invalid date or time format. Please use DD/MM/YYYY at HH:MM AM/PM format."
             
-            # Date and time with 24h clock
             elif pattern == DATETIME_FORMATS[2] or pattern == DATETIME_FORMATS[3]:
                 day, month, year, hour, minute = groups
                 year = int("20" + year if len(year) == 2 else year)
@@ -379,7 +373,6 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
                 except ValueError:
                     return None, "Invalid date or time format. Please use DD/MM/YYYY at HH:MM format."
             
-            # Just time with 12h clock
             elif pattern == DATETIME_FORMATS[4] or pattern == DATETIME_FORMATS[5]:
                 if pattern == DATETIME_FORMATS[4]:
                     hour, minute, ampm = groups
@@ -394,13 +387,11 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
                 
                 time_today = now.replace(hour=hour, minute=int(minute), second=0, microsecond=0)
                 
-                # If the time is in the past, schedule for tomorrow
                 if time_today < now:
                     time_today += timedelta(days=1)
                 
                 return time_today, None
             
-            # Just time with 24h clock
             elif pattern == DATETIME_FORMATS[6] or pattern == DATETIME_FORMATS[7]:
                 if pattern == DATETIME_FORMATS[6]:
                     hour, minute = groups
@@ -409,63 +400,53 @@ def parse_reminder_time(text: str) -> Tuple[Optional[datetime], Optional[str]]:
                 
                 time_today = now.replace(hour=int(hour), minute=int(minute), second=0, microsecond=0)
                 
-                # If the time is in the past, schedule for tomorrow
                 if time_today < now:
                     time_today += timedelta(days=1)
                 
                 return time_today, None
             
-            # Relative time: minutes
             elif pattern == DATETIME_FORMATS[8]:
+                seconds = int(groups[0])
+                return now + timedelta(seconds=seconds), None
+            
+            elif pattern == DATETIME_FORMATS[9]:
                 minutes = int(groups[0])
                 return now + timedelta(minutes=minutes), None
             
-            # Relative time: hours
-            elif pattern == DATETIME_FORMATS[9]:
+            elif pattern == DATETIME_FORMATS[10]:
                 hours = int(groups[0])
                 return now + timedelta(hours=hours), None
             
-            # Relative time: days
-            elif pattern == DATETIME_FORMATS[10]:
+            elif pattern == DATETIME_FORMATS[11]:
                 days = int(groups[0])
                 return now + timedelta(days=days), None
             
-            # Relative time: weeks
-            elif pattern == DATETIME_FORMATS[11]:
+            elif pattern == DATETIME_FORMATS[12]:
                 weeks = int(groups[0])
                 return now + timedelta(weeks=weeks), None
             
-            # Natural language: tomorrow
-            elif pattern == DATETIME_FORMATS[12]:
-                # Set time to 9:00 AM tomorrow
+            elif pattern == DATETIME_FORMATS[13]:
                 tomorrow = now + timedelta(days=1)
                 return tomorrow.replace(hour=9, minute=0, second=0, microsecond=0), None
             
-            # Natural language: today
-            elif pattern == DATETIME_FORMATS[13]:
-                # Set time to 1 hour from now
+            elif pattern == DATETIME_FORMATS[14]:
                 return now + timedelta(hours=1), None
             
-            # Natural language: next week
-            elif pattern == DATETIME_FORMATS[14]:
-                # Set time to 9:00 AM next Monday
+            elif pattern == DATETIME_FORMATS[15]:
                 days_until_monday = (7 - now.weekday()) % 7
                 if days_until_monday == 0:
                     days_until_monday = 7
                 next_monday = now + timedelta(days=days_until_monday)
                 return next_monday.replace(hour=9, minute=0, second=0, microsecond=0), None
             
-            # Natural language: next month
-            elif pattern == DATETIME_FORMATS[15]:
-                # Set time to 9:00 AM on the 1st of next month
+            elif pattern == DATETIME_FORMATS[16]:
                 if now.month == 12:
                     next_month = now.replace(year=now.year + 1, month=1, day=1)
                 else:
                     next_month = now.replace(month=now.month + 1, day=1)
                 return next_month.replace(hour=9, minute=0, second=0, microsecond=0), None
     
-    # No match found
-    return None, "I couldn't understand the time format. Please use a specific date/time (e.g., 'DD/MM/YYYY at HH:MM') or a relative time (e.g., 'in 30 minutes')."
+    return None, "I couldn't understand the time format. Please use a specific date/time (e.g., 'DD/MM/YYYY at HH:MM') or a relative time (e.g., 'in 30 seconds', 'in 30 minutes')."
 
 def parse_recurrence_pattern(text: str) -> Tuple[Optional[str], Optional[datetime], Optional[str]]:
     """
@@ -477,16 +458,13 @@ def parse_recurrence_pattern(text: str) -> Tuple[Optional[str], Optional[datetim
     Returns:
         Tuple of (cron_expression, first_occurrence, error_message)
     """
-    # Current time as base
     now = datetime.now(timezone.utc)
     
-    # Try each format
     for pattern in RECURRENCE_FORMATS:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             groups = match.groups()
             
-            # Daily at specific time
             if pattern == RECURRENCE_FORMATS[0]:
                 hour, minute, ampm = groups
                 hour = int(hour)
@@ -498,17 +476,14 @@ def parse_recurrence_pattern(text: str) -> Tuple[Optional[str], Optional[datetim
                     elif hour < 12 and ampm.lower().startswith('p'):
                         hour += 12
                 
-                # Create cron expression: minute hour * * *
                 cron = f"{minute} {hour} * * *"
                 
-                # Calculate first occurrence
                 first_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 if first_time < now:
                     first_time += timedelta(days=1)
                 
                 return cron, first_time, None
             
-            # Weekly on specific day
             elif pattern == RECURRENCE_FORMATS[1]:
                 day_of_week, hour, minute, ampm = groups
                 hour = int(hour)
@@ -520,13 +495,10 @@ def parse_recurrence_pattern(text: str) -> Tuple[Optional[str], Optional[datetim
                     elif hour < 12 and ampm.lower().startswith('p'):
                         hour += 12
                 
-                # Get day of week number (0=Sunday, 6=Saturday)
                 dow = DOW_MAP[day_of_week.lower()]
                 
-                # Create cron expression: minute hour * * day
                 cron = f"{minute} {hour} * * {dow}"
                 
-                # Calculate days until next occurrence
                 days_until = (dow - now.weekday()) % 7
                 if days_until == 0 and (now.hour > hour or (now.hour == hour and now.minute >= minute)):
                     days_until = 7
@@ -536,7 +508,6 @@ def parse_recurrence_pattern(text: str) -> Tuple[Optional[str], Optional[datetim
                 
                 return cron, first_time, None
             
-            # Monthly on specific day
             elif pattern == RECURRENCE_FORMATS[2]:
                 day, _, _, hour, minute, ampm = groups
                 day = int(day)
@@ -549,13 +520,10 @@ def parse_recurrence_pattern(text: str) -> Tuple[Optional[str], Optional[datetim
                     elif hour < 12 and ampm.lower().startswith('p'):
                         hour += 12
                 
-                # Create cron expression: minute hour day-of-month * *
                 cron = f"{minute} {hour} {day} * *"
                 
-                # Calculate first occurrence
                 first_time = now.replace(day=min(day, 28), hour=hour, minute=minute, second=0, microsecond=0)
                 if first_time < now:
-                    # Move to next month
                     if now.month == 12:
                         first_time = first_time.replace(year=now.year+1, month=1)
                     else:
@@ -563,7 +531,6 @@ def parse_recurrence_pattern(text: str) -> Tuple[Optional[str], Optional[datetim
                 
                 return cron, first_time, None
     
-    # No match found
     return None, None, "I couldn't understand the recurrence pattern. Please use a format like 'every day at HH:MM', 'every Monday at HH:MM', or 'every 15th of each month at HH:MM'."
 
 def is_image_request(text: str) -> bool:
@@ -576,7 +543,6 @@ def is_image_request(text: str) -> bool:
     Returns:
         True if it's an image generation request, False otherwise
     """
-    # Look for common image generation phrases
     patterns = [
         r'(?i)generate (?:an?|some) images?',
         r'(?i)create (?:an?|some) images?',
@@ -601,7 +567,6 @@ def is_reminder_request(text: str) -> bool:
     Returns:
         True if it's a reminder request, False otherwise
     """
-    # Look for common reminder phrases
     patterns = [
         r'(?i)remind me',
         r'(?i)set (?:a|an) reminder',
@@ -622,7 +587,6 @@ def extract_reminder_text(text: str) -> str:
     Returns:
         The reminder text
     """
-    # Remove 'remind me' and similar prefixes
     patterns = [
         r'(?i)remind me to ',
         r'(?i)remind me ',
@@ -636,11 +600,10 @@ def extract_reminder_text(text: str) -> str:
         r'(?i)schedule (?:a|an) reminder for ',
     ]
     
-    # Replace patterns that indicate timing
     timing_patterns = [
         r'(?i) at \d{1,2}:\d{2}(?: ?[APap][Mm])?',
         r'(?i) on \d{1,2}[./-]\d{1,2}[./-](?:\d{4}|\d{2})',
-        r'(?i) in \d+ (?:minute|hour|day|week)s?',
+        r'(?i) in \d+ (?:second|minute|hour|day|week)s?',
         r'(?i) tomorrow',
         r'(?i) next week',
         r'(?i) every day',
@@ -648,7 +611,6 @@ def extract_reminder_text(text: str) -> str:
         r'(?i) every \d{1,2}(?:st|nd|rd|th)? of (?:each|every) month',
     ]
     
-    # First, extract just the reminder text without the prefix
     cleaned_text = text
     for pattern in patterns:
         match = re.search(pattern, text)
@@ -656,11 +618,9 @@ def extract_reminder_text(text: str) -> str:
             cleaned_text = re.sub(pattern, '', text, 1)
             break
     
-    # Then remove timing information if it's at the end
     for pattern in timing_patterns:
         cleaned_text = re.sub(pattern + r'$', '', cleaned_text)
     
-    # Clean up any extra spaces
     cleaned_text = cleaned_text.strip()
     
     return cleaned_text if cleaned_text else "Reminder" 
