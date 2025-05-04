@@ -11,7 +11,8 @@ After seeing Perplexity AI's integration with WhatsApp, I wanted to bring simila
 - 🔍 **Real-time Web Search**: Get up-to-date information directly from the web
 - 🧠 **Thinking Mode**: See the AI's step-by-step reasoning process with Sonar Reasoning models
 - 🔔 **Smart Reminders**: Set one-time or recurring reminders with natural language
-- 🖼️ **Image Analysis**: Send photos with questions to analyze images and get insights
+- 📰 **Breaking News Updates**: Subscribe to topics and receive automatic updates at chosen intervals
+- 💻 **Code Analysis & Enhancement**: Send code snippets for analysis, optimization, and bug fixing
 - ⚙️ **Model Selection**: Choose from different Perplexity models for different use cases
 - 💬 **Conversation History**: Maintains context through conversations for meaningful follow-ups
 - 📚 **Reference Attribution**: Properly cites sources from web searches with clickable links
@@ -26,7 +27,26 @@ After seeing Perplexity AI's integration with WhatsApp, I wanted to bring simila
 - **PostgreSQL**: Powerful, open-source relational database
 - **Docker & Docker Compose**: Containerization for easy deployment
 - **Perplexity Sonar API**: AI models with real-time web search capabilities
-- **APScheduler**: Advanced Python scheduler for reminders
+- **APScheduler**: Advanced Python scheduler for reminders and news updates
+
+## Judging Criteria Addressed
+
+### Technological Implementation
+- **Quality Software Development**: The project follows clean architecture principles with separation of concerns (services, models, bot handlers), robust error handling, and comprehensive logging.
+- **Tool Leverage**: We thoroughly leverage Perplexity's Sonar API, utilizing multiple models (Pro, Reasoning, Deep Research) and features (web search, code analysis).
+- **Code Quality**: The codebase maintains consistency in coding style, uses typed hints for better IDE support, employs async/await patterns for efficient I/O operations, and includes comprehensive documentation.
+
+### Design
+- **User Experience**: The bot provides an intuitive conversational interface with clear command documentation, interactive buttons for settings, formatted responses with proper citations, and easy-to-use natural language inputs.
+- **Frontend/Backend Balance**: While Telegram provides the frontend UI, we've enhanced it with custom inline keyboards, specially formatted responses, and an intelligent conversational flow. The backend is robust with a database-driven persistence layer, scheduled background tasks, and efficient API integration.
+
+### Potential Impact
+- **Target Community**: For researchers, students, developers, and professionals, this bot provides immediate access to AI-powered research and analysis tools without requiring additional apps.
+- **Beyond Target Community**: The bot could serve as an educational tool in regions with limited internet access but good Telegram connectivity, as a real-time news curator for journalists, or as a code assistant for development teams.
+
+### Quality of the Idea
+- **Creativity**: The integration of scheduled breaking news, intelligent code analysis, and natural language reminders creates a unique AI assistant experience specific to Telegram.
+- **Improvement Over Existing Solutions**: While Perplexity offers a WhatsApp integration, our solution adds Telegram support with expanded features (recurring reminders, news subscriptions, code analysis) and enhanced user interaction patterns.
 
 ## Setup Guide
 
@@ -85,8 +105,9 @@ After seeing Perplexity AI's integration with WhatsApp, I wanted to bring simila
 
 2. **Feature Testing**:
    - **Test thinking mode**: Send `/thinking` to toggle thinking mode, then ask a complex question
-   - **Test image analysis**: Send a photo with a caption asking about the image
    - **Test reminders**: Say "Remind me to check email in 10 minutes"
+   - **Test news subscription**: Use `/subscribe AI` to get regular updates on AI
+   - **Test code analysis**: Send a code snippet wrapped in triple backticks with a question
    - **Test model selection**: Use `/model` to change the AI model
 
 3. **Debugging**:
@@ -105,6 +126,8 @@ After seeing Perplexity AI's integration with WhatsApp, I wanted to bring simila
 - `/thinking` - Toggle reasoning visualization
 - `/reminder` - Set a new reminder
 - `/list_reminders` - Display all active reminders
+- `/subscribe TOPIC` - Subscribe to news updates on a topic
+- `/mysubs` - List your news subscriptions
 - `/clear` - Reset conversation history
 
 ### Advanced Features
@@ -126,12 +149,20 @@ The bot understands natural language for setting reminders:
   - "Remind me to pay rent on the 1st of every month"
   - "Remind me to water plants every Monday and Thursday at 6 PM"
 
-#### Image Analysis
+#### Breaking News Subscriptions
 
-Send a photo with a question as the caption to analyze images:
-- "What's in this picture?"
-- "Can you identify this plant?"
-- "What does this error message mean?"
+Get regular updates on topics of interest:
+- Use `/subscribe AI` to follow AI news (replace with any topic)
+- Choose hourly, daily, or weekly updates
+- View and manage subscriptions with `/mysubs`
+
+#### Code Analysis & Enhancement
+
+Send code to analyze, debug, or enhance:
+- Send code wrapped in triple backticks (```code here```)
+- Add your question or request before/after the code block
+- Example: "Fix this bug: ```function example() {...}```"
+- Get detailed analysis, optimization suggestions, and bug fixes
 
 #### Available Models
 
@@ -144,6 +175,15 @@ Choose different models based on your needs:
 - **Sonar Deep Research**: Comprehensive research with exhaustive search
 - **R1-1776**: Optimized for uncensored, factual information
 
+## Future Improvements
+
+- **PDF Document Analysis**: Upload and analyze PDF documents, ask questions about their content, and get insights from research papers, reports, and other documents
+- **Voice Note Analysis**: Transcribe and analyze voice messages for accessibility and convenient interaction
+- **Multi-language Support**: Add support for multiple languages through Perplexity's language capabilities
+- **Collaborative Sessions**: Allow multiple users to join a research or brainstorming session
+- **Advanced Data Visualization**: Generate charts and graphs from data analysis requests
+- **Integration with External Tools**: Connect with tools like Google Drive, Notion, or GitHub for enhanced productivity
+
 ## Architecture
 
 The application follows a modular structure:
@@ -153,7 +193,8 @@ The application follows a modular structure:
   - **bot/**: Telegram handlers and utilities
   - **db/**: Database connection and session management
   - **models/**: SQLAlchemy models for data persistence
-  - **scheduler/**: Reminder scheduling system
+  - **services/**: Business logic services (News, PDF, etc.)
+  - **scheduler/**: Reminder and news scheduling systems
   - **main.py**: Application entry point
 
 ## Contribution
