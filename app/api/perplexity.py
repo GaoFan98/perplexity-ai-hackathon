@@ -199,12 +199,52 @@ class PerplexityAPI:
                 if "search_results" in data.get("choices", [{}])[0].get("message", {}).get("metadata", {}):
                     search_results = data["choices"][0]["message"]["metadata"]["search_results"]
                 
-                # Clean up any assistant tags at the beginning
+                # Clean up any tags at the beginning and in content
+                # Remove assistant tags
                 content = re.sub(r'^(&amp;lt;｜Assistant｜&amp;gt;|<｜Assistant｜>)', '', content).strip()
+                
+                # Replace encoded entities with their actual characters
+                content = content.replace('&amp;lt;', '<').replace('&amp;gt;', '>')
+                
+                # Remove raw <think> tags if they appear as plain text
+                content = re.sub(r'&lt;think&gt;|<think>|&amp;lt;think&amp;gt;', '', content)
+                content = re.sub(r'&lt;/think&gt;|</think>|&amp;lt;/think&amp;gt;', '', content)
+                
+                # Remove all other encoded HTML tags that may appear
+                content = re.sub(r'&lt;[^&]*&gt;|&amp;lt;[^&]*&amp;gt;', '', content)
                 
                 # For reasoning models, extract thinking and final answer if show_thinking is enabled
                 if show_thinking:
-                    # Try to extract thinking content using tags
+                    # Check if the content has a clear "thinking" and "answer" section with emojis or specific headers
+                    emoji_sections = re.split(r'(🧠 Thinking Process:|📝 Answer:)', content)
+                    if len(emoji_sections) >= 3:
+                        # Find thinking and answer sections based on emojis
+                        thinking_start = -1
+                        answer_start = -1
+                        
+                        for i, section in enumerate(emoji_sections):
+                            if section.strip() == "🧠 Thinking Process:":
+                                thinking_start = i
+                            elif section.strip() == "📝 Answer:":
+                                answer_start = i
+                        
+                        if thinking_start >= 0 and answer_start > thinking_start:
+                            # Extract thinking content (everything between thinking emoji and answer emoji)
+                            thinking_content = "".join(emoji_sections[thinking_start+1:answer_start]).strip()
+                            
+                            # Extract answer content (everything after answer emoji)
+                            answer_content = "".join(emoji_sections[answer_start+1:]).strip()
+                            
+                            return {
+                                "success": True,
+                                "thinking": thinking_content,
+                                "answer": answer_content,
+                                "model": model,
+                                "search_results": search_results,
+                                "full_response": data
+                            }
+                    
+                    # Try to extract thinking content using <think> tags
                     if "<think>" in content and "</think>" in content:
                         # Extract content between <think> tags
                         think_start = content.find("<think>") + len("<think>")
@@ -222,109 +262,6 @@ class PerplexityAPI:
                             "search_results": search_results,
                             "full_response": data
                         }
-                    # If no explicit tags but model is a reasoning model, try other patterns
-                    elif "reasoning" in model:
-                        # Check for "📝 Answer:" marker which often separates thinking from answer
-                        if "📝 Answer:" in content:
-                            parts = content.split("📝 Answer:", 1)
-                            if len(parts) == 2:
-                                thinking = parts[0].strip()
-                                answer = parts[1].strip()
-                                
-                                # Make sure we don't have thinking content after the answer
-                                if "Here's my reasoning process:" in answer:
-                                    answer = answer.split("Here's my reasoning process:", 1)[0].strip()
-                                    
-                                return {
-                                    "success": True,
-                                    "thinking": thinking,
-                                    "answer": answer,
-                                    "model": model,
-                                    "search_results": search_results,
-                                    "full_response": data
-                                }
-                                
-                        # Look for other patterns like "Thinking:" or "Reasoning:"
-                        patterns = [
-                            (r"(?i)Thinking:\s*(.+?)(?=\n\n📝 Answer:|$)", r"(?i)📝 Answer:\s*(.+)"),
-                            (r"(?i)Here's my reasoning process:\s*(.+?)(?=\n\n📝 Answer:|$)", r"(?i)📝 Answer:\s*(.+)"),
-                            (r"(?i)Reasoning:\s*(.+?)(?=\n\nAnswer:|$)", r"(?i)Answer:\s*(.+)"),
-                            (r"(?i)Step by step:\s*(.+?)(?=\n\nResponse:|$)", r"(?i)Response:\s*(.+)"),
-                            (r"(?i)Analysis:\s*(.+?)(?=\n\nConclusion:|$)", r"(?i)Conclusion:\s*(.+)")
-                        ]
-                        
-                        for thinking_pattern, answer_pattern in patterns:
-                            thinking_match = re.search(thinking_pattern, content, re.DOTALL)
-                            answer_match = re.search(answer_pattern, content, re.DOTALL)
-                            
-                            if thinking_match and answer_match:
-                                thinking = thinking_match.group(1).strip()
-                                answer = answer_match.group(1).strip()
-                                
-                                # Make sure there's no continuation of thinking after answer has started
-                                if "Here's my reasoning process:" in answer:
-                                    answer = answer.split("Here's my reasoning process:", 1)[0].strip()
-                                
-                                return {
-                                    "success": True,
-                                    "thinking": thinking,
-                                    "answer": answer,
-                                    "model": model,
-                                    "search_results": search_results,
-                                    "full_response": data
-                                }
-                        
-                        # If no patterns match, try to split at clear answer section headings
-                        content_splits = re.split(r'\n\n---\n\n|\n---\n|\n\n#|📝 Answer:', content)
-                        if len(content_splits) > 1:
-                            # Use everything before first split as thinking
-                            thinking = content_splits[0].strip()
-                            # Use everything after as answer
-                            answer = "\n\n".join(content_splits[1:]).strip()
-                            
-                            return {
-                                "success": True,
-                                "thinking": thinking,
-                                "answer": answer,
-                                "model": model,
-                                "search_results": search_results,
-                                "full_response": data
-                            }
-                            
-                        # Last resort: look for numbered list items followed by answer
-                        match = re.search(r'(\d+)\.\s+(.*?)(?=\n\n📝\s+Answer:|\n📝\s+Answer:)', content, re.DOTALL)
-                        if match:
-                            # Find where the numbered thinking ends and the answer begins
-                            answer_start = content.find("📝 Answer:")
-                            if answer_start > 0:
-                                thinking = content[:answer_start].strip()
-                                answer = content[answer_start + len("📝 Answer:"):].strip()
-                                
-                                return {
-                                    "success": True,
-                                    "thinking": thinking,
-                                    "answer": answer, 
-                                    "model": model,
-                                    "search_results": search_results,
-                                    "full_response": data
-                                }
-                                
-                        # If still no match, split the content roughly in half as a fallback
-                        content_parts = content.split("\n\n")
-                        if len(content_parts) > 2:
-                            # Use first half as thinking, second half as answer
-                            midpoint = len(content_parts) // 2
-                            thinking = "\n\n".join(content_parts[:midpoint]).strip()
-                            answer = "\n\n".join(content_parts[midpoint:]).strip()
-                            
-                            return {
-                                "success": True,
-                                "thinking": thinking,
-                                "answer": answer,
-                                "model": model,
-                                "search_results": search_results,
-                                "full_response": data
-                            }
                 
                 # If we didn't return thinking/answer above, return the full content as answer
                 return {
