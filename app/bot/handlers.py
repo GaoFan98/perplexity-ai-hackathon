@@ -26,7 +26,8 @@ from bot.utils import (
     create_thinking_mode_keyboard, create_settings_keyboard,
     parse_reminder_time, parse_recurrence_pattern, 
     is_image_request, is_reminder_request, extract_reminder_text,
-    create_frequency_keyboard, create_subscription_keyboard
+    create_frequency_keyboard, create_subscription_keyboard,
+    detect_code_snippet, format_code_response
 )
 from services.news_service import NewsService
 from models.topic_subscription import TopicSubscription
@@ -92,6 +93,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🧠 *Thinking Mode* - See the AI's reasoning process\n"
         "🔔 *Reminders* - Set one-time or recurring reminders\n"
         "📰 *News Updates* - Get regular updates on your topics of interest\n"
+        "💻 *Code Analysis* - Send code snippets to analyze and improve\n"
         "🖼️ *Image Analysis* - Send an image with a question\n\n"
         
         "*Setting Reminders:*\n"
@@ -102,6 +104,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "- Use `/subscribe AI` to follow a topic (replace AI with any topic)\n"
         "- Choose hourly, daily, or weekly updates\n"
         "- Get breaking news delivered automatically\n\n"
+        
+        "*Code Analysis:*\n"
+        "- Send code wrapped in ```code here``` backticks\n"
+        "- Add your question before or after the code block\n"
+        "- Example: `Fix this bug: ```function example() {...}````\n"
+        "- Get detailed analysis and improvement suggestions\n\n"
         
         "*Models:*\n"
         "- Sonar Pro - Fast search with grounding\n"
@@ -557,6 +565,148 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
     
     return None
 
+async def handle_code_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, code: str, query: str) -> None:
+    """
+    Handle a code analysis request.
+    
+    Args:
+        update: The update object
+        context: The context object
+        code: The code snippet to analyze
+        query: The specific query about the code
+    """
+    await update.message.chat.send_action(action="typing")
+    
+    loading_message = await update.message.reply_text("🧮 Analyzing your code... This might take a moment.")
+    
+    async with async_session() as session:
+        user = await get_or_create_user(session, update)
+        
+        model = user.preferred_model
+        # Use reasoning models for code analysis for better results
+        if "reasoning" not in model:
+            if model == "sonar-pro":
+                model = "sonar-reasoning-pro"
+            elif model == "sonar":
+                model = "sonar-reasoning"
+        
+        thinking_mode = user.thinking_mode
+        
+        conversation_history = get_conversation_history(user)
+        
+        perplexity_api = context.bot_data.get("perplexity_api")
+        
+        # Craft a specialized prompt for code analysis
+        code_analysis_prompt = (
+            f"{query}\n\n"
+            f"Here's the code:\n```\n{code}\n```\n\n"
+            f"Please analyze this code, identify any issues, and suggest improvements. "
+            f"Include code snippets for any changes you recommend."
+        )
+        
+        typing_task = asyncio.create_task(keep_typing_indicator(update))
+        
+        try:
+            response = await perplexity_api.ask_question(
+                query=code_analysis_prompt,
+                model=model,
+                conversation_history=conversation_history,
+                show_thinking=thinking_mode
+            )
+            
+            typing_task.cancel()
+            
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.message.chat_id,
+                    message_id=loading_message.message_id
+                )
+            except Exception as e:
+                logger.error(f"Error deleting loading message: {str(e)}")
+            
+            if response.get("success"):
+                update_conversation_history(user, "user", code_analysis_prompt)
+                
+                if thinking_mode and "thinking" in response:
+                    thinking_text = sanitize_text(response['thinking'])
+                    
+                    await update.message.reply_text("🧠 Thinking Process:", reply_to_message_id=update.message.message_id)
+                    
+                    if len(thinking_text) > 4000:
+                        chunks = [thinking_text[i:i+4000] for i in range(0, len(thinking_text), 4000)]
+                        for chunk in chunks:
+                            await update.message.reply_text(chunk)
+                    else:
+                        await update.message.reply_text(thinking_text)
+                    
+                    answer = format_code_response(response["answer"])
+                    
+                    await update.message.reply_text("💻 Code Analysis:", parse_mode=ParseMode.MARKDOWN)
+                    await split_and_send_long_message(update, answer, parse_mode=ParseMode.MARKDOWN)
+                    
+                    await save_message(
+                        session,
+                        user,
+                        "assistant",
+                        f"[Thinking]: {response['thinking']}\n\n[Answer]: {response['answer']}",
+                        model_used=model,
+                        include_thinking=True
+                    )
+                    
+                    update_conversation_history(user, "assistant", response["answer"])
+                else:
+                    answer = format_code_response(response["answer"])
+                    
+                    await update.message.reply_text("💻 Code Analysis:", parse_mode=ParseMode.MARKDOWN)
+                    await split_and_send_long_message(update, answer, parse_mode=ParseMode.MARKDOWN)
+                    
+                    await save_message(
+                        session,
+                        user,
+                        "assistant",
+                        response["answer"],
+                        model_used=model
+                    )
+                    
+                    update_conversation_history(user, "assistant", response["answer"])
+            else:
+                # Handle error
+                error_message = response.get("error", "An error occurred while analyzing your code.")
+                await update.message.reply_text(
+                    f"❌ {sanitize_text(error_message)}"
+                )
+                
+                # Save error message
+                await save_message(
+                    session,
+                    user,
+                    "assistant",
+                    f"[Error]: {error_message}",
+                    model_used=model
+                )
+        except Exception as e:
+            # Cancel the typing indicator
+            typing_task.cancel()
+            
+            # Delete the loading message
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.message.chat_id,
+                    message_id=loading_message.message_id
+                )
+            except Exception as delete_error:
+                logger.error(f"Error deleting loading message: {str(delete_error)}")
+            
+            # Log and send error message
+            logger.error(f"Error analyzing code: {str(e)}")
+            await update.message.reply_text(
+                f"❌ An error occurred while analyzing your code: {sanitize_text(str(e))}"
+            )
+        
+        # Save updated conversation history
+        await session.commit()
+
+# Update the handle_message function to detect and route code-related messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Optional[int]:
     """Handle user messages."""
     # Get the user message
@@ -576,6 +726,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await message.reply_text("Invalid reminder ID format.")
             return None
     
+    # Check if it's a code snippet
+    has_code, code_snippet, query = detect_code_snippet(text)
+    if has_code:
+        return await handle_code_analysis(update, context, code_snippet, query)
+    
     # Check if it's a reminder request
     if is_reminder_request(text):
         return await handle_reminder_request(update, context, text)
@@ -583,6 +738,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Check if it's an image generation request
     if is_image_request(text):
         return await handle_image_generation(update, context, text)
+    
+    # Check if awaiting PDF question
+    if context.user_data.get("current_pdf_id") and context.user_data.get("_state") == AWAITING_PDF_QUESTION:
+        pdf_id = context.user_data.pop("current_pdf_id")
+        return await handle_pdf_question(update, context, pdf_id, text)
     
     # Process as a regular question
     return await handle_regular_message(update, context, text)
@@ -727,65 +887,163 @@ async def split_and_send_long_message(update: Update, text: str, parse_mode=None
     # Telegram message length limit is 4096 characters
     MAX_MESSAGE_LENGTH = 4000  # Use a bit less than 4096 to be safe
     
-    # Split by newlines to keep paragraphs together when possible
-    paragraphs = text.split('\n\n')
-    chunks = []
-    current_chunk = ""
-    
-    for paragraph in paragraphs:
-        # If adding this paragraph would exceed limit, start a new chunk
-        if len(current_chunk) + len(paragraph) + 2 > MAX_MESSAGE_LENGTH:
-            if current_chunk:
-                chunks.append(current_chunk)
-            
-            # If the paragraph itself is too long, split it further
-            if len(paragraph) > MAX_MESSAGE_LENGTH:
-                # Split into smaller pieces (may break mid-sentence)
-                words = paragraph.split(' ')
-                paragraph_chunk = ""
-                
-                for word in words:
-                    if len(paragraph_chunk) + len(word) + 1 > MAX_MESSAGE_LENGTH:
-                        chunks.append(paragraph_chunk)
-                        paragraph_chunk = word
-                    else:
-                        if paragraph_chunk:
-                            paragraph_chunk += " " + word
+    # For Markdown, we need to ensure we don't break formatting
+    if parse_mode == ParseMode.MARKDOWN:
+        # Try to split on double newlines to keep paragraphs together
+        paragraphs = text.split('\n\n')
+        chunks = []
+        current_chunk = ""
+        
+        # Handle code blocks specially
+        in_code_block = False
+        code_block_buffer = ""
+        
+        for paragraph in paragraphs:
+            # Check if this paragraph starts or ends a code block
+            if paragraph.startswith("```") or "```" in paragraph:
+                if "```" in paragraph and not paragraph.startswith("```"):
+                    # Code block within a paragraph, try to keep it together
+                    if len(current_chunk) + len(paragraph) + 2 <= MAX_MESSAGE_LENGTH:
+                        if current_chunk:
+                            current_chunk += "\n\n" + paragraph
                         else:
-                            paragraph_chunk = word
+                            current_chunk = paragraph
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                        current_chunk = paragraph
+                    continue
                 
-                if paragraph_chunk:
-                    current_chunk = paragraph_chunk
+                # Count occurrences of code block markers
+                matches = paragraph.count("```")
+                
+                # If odd number of ``` markers
+                if matches % 2 != 0:
+                    in_code_block = not in_code_block
+                
+                # If we're entering a code block
+                if in_code_block and code_block_buffer == "":
+                    code_block_buffer = paragraph
+                # If we're exiting a code block
+                elif not in_code_block and code_block_buffer != "":
+                    code_block_buffer += "\n\n" + paragraph
+                    
+                    # Check if the complete code block fits in the current chunk
+                    if len(current_chunk) + len(code_block_buffer) + 2 <= MAX_MESSAGE_LENGTH:
+                        if current_chunk:
+                            current_chunk += "\n\n" + code_block_buffer
+                        else:
+                            current_chunk = code_block_buffer
+                    else:
+                        # If not, start a new chunk
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                        current_chunk = code_block_buffer
+                    
+                    code_block_buffer = ""
+                # If we're continuing a code block
+                elif in_code_block:
+                    code_block_buffer += "\n\n" + paragraph
                 else:
-                    current_chunk = ""
+                    # Regular paragraph handling
+                    if len(current_chunk) + len(paragraph) + 2 <= MAX_MESSAGE_LENGTH:
+                        if current_chunk:
+                            current_chunk += "\n\n" + paragraph
+                        else:
+                            current_chunk = paragraph
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                        current_chunk = paragraph
             else:
-                current_chunk = paragraph
-        else:
-            if current_chunk:
-                current_chunk += "\n\n" + paragraph
+                # If we're in a code block, add to code block buffer
+                if in_code_block:
+                    code_block_buffer += "\n\n" + paragraph
+                else:
+                    # Regular paragraph handling
+                    if len(current_chunk) + len(paragraph) + 2 <= MAX_MESSAGE_LENGTH:
+                        if current_chunk:
+                            current_chunk += "\n\n" + paragraph
+                        else:
+                            current_chunk = paragraph
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk)
+                        current_chunk = paragraph
+        
+        # Add the last chunk if it's not empty
+        if current_chunk:
+            chunks.append(current_chunk)
+        
+        # Add any remaining code block buffer
+        if code_block_buffer:
+            if len(chunks[-1]) + len(code_block_buffer) + 2 <= MAX_MESSAGE_LENGTH:
+                chunks[-1] += "\n\n" + code_block_buffer
             else:
-                current_chunk = paragraph
+                chunks.append(code_block_buffer)
+    else:
+        # For non-Markdown text, use simpler splitting
+        # Split by newlines to keep paragraphs together when possible
+        paragraphs = text.split('\n\n')
+        chunks = []
+        current_chunk = ""
+        
+        for paragraph in paragraphs:
+            # If adding this paragraph would exceed limit, start a new chunk
+            if len(current_chunk) + len(paragraph) + 2 > MAX_MESSAGE_LENGTH:
+                if current_chunk:
+                    chunks.append(current_chunk)
+                
+                # If the paragraph itself is too long, split it further
+                if len(paragraph) > MAX_MESSAGE_LENGTH:
+                    # Split into smaller pieces (may break mid-sentence)
+                    words = paragraph.split(' ')
+                    paragraph_chunk = ""
+                    
+                    for word in words:
+                        if len(paragraph_chunk) + len(word) + 1 > MAX_MESSAGE_LENGTH:
+                            chunks.append(paragraph_chunk)
+                            paragraph_chunk = word
+                        else:
+                            if paragraph_chunk:
+                                paragraph_chunk += " " + word
+                            else:
+                                paragraph_chunk = word
+                    
+                    if paragraph_chunk:
+                        current_chunk = paragraph_chunk
+                    else:
+                        current_chunk = ""
+                else:
+                    current_chunk = paragraph
+            else:
+                if current_chunk:
+                    current_chunk += "\n\n" + paragraph
+                else:
+                    current_chunk = paragraph
+        
+        # Add the last chunk if it's not empty
+        if current_chunk:
+            chunks.append(current_chunk)
     
-    # Add the last chunk if it's not empty
-    if current_chunk:
-        chunks.append(current_chunk)
-    
-    # Delete the loading message
+    # Try to delete the loading message if context is provided
     try:
-        await context.bot.delete_message(
-            chat_id=update.message.chat_id,
-            message_id=loading_message.message_id
-        )
+        if 'context' in locals() and context and context.bot:
+            await context.bot.delete_message(
+                chat_id=update.message.chat_id,
+                message_id=loading_message.message_id
+            )
     except Exception as e:
         logger.error(f"Error deleting loading message: {str(e)}")
     
     # Send each chunk as a separate message
     for chunk in chunks:
         try:
-            await update.message.reply_text(chunk)
+            await update.message.reply_text(chunk, parse_mode=parse_mode)
         except Exception as e:
             logger.error(f"Error sending message chunk: {str(e)}")
             try:
+                # Try sending without parse mode if there was an error
                 clean_text = ''.join(c for c in chunk if c.isalnum() or c.isspace() or c in ',.?!:;()[]{}')
                 await update.message.reply_text(clean_text)
             except Exception as inner_e:

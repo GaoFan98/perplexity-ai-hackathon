@@ -645,4 +645,116 @@ def create_subscription_keyboard(subscriptions):
         ])
     
     keyboard.append([InlineKeyboardButton("Back to Settings ⬅️", callback_data="settings")])
-    return InlineKeyboardMarkup(keyboard) 
+    return InlineKeyboardMarkup(keyboard)
+
+def detect_code_snippet(text: str) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Detect if a message contains a code snippet and extract it.
+    
+    Args:
+        text: The message text to analyze
+        
+    Returns:
+        Tuple of (has_code, code_snippet, query)
+    """
+    # Check for code blocks with markdown-style backticks
+    code_block_pattern = r"```(?:\w+)?\n([\s\S]+?)```"
+    code_matches = re.findall(code_block_pattern, text)
+    
+    if code_matches:
+        # Extract the code and the query
+        code_snippet = code_matches[0].strip()
+        
+        # Remove the code block from the text to get the query
+        query = re.sub(code_block_pattern, "", text).strip()
+        
+        # If no explicit query, use a default one
+        if not query:
+            query = "Analyze this code and suggest improvements."
+            
+        return True, code_snippet, query
+    
+    # Check for smaller inline code snippets
+    inline_code_pattern = r"`(.*?)`"
+    inline_matches = re.findall(inline_code_pattern, text)
+    
+    if inline_matches and any(len(m) > 15 for m in inline_matches):
+        # Extract the longest inline code snippet
+        code_snippet = max(inline_matches, key=len).strip()
+        
+        # Remove the code from the text to get the query
+        query = re.sub(inline_code_pattern, "", text).strip()
+        
+        # If no explicit query, use a default one
+        if not query:
+            query = "Analyze this code and suggest improvements."
+            
+        return True, code_snippet, query
+    
+    # Try to detect code without explicit formatting
+    # Look for common code patterns
+    code_indicators = [
+        # Function definitions
+        r"def\s+\w+\s*\(.*\)\s*:",  # Python
+        r"function\s+\w+\s*\(.*\)\s*{",  # JavaScript
+        r"(?:public|private|protected)?\s+(?:static\s+)?(?:\w+)?\s+\w+\s*\(.*\)\s*{",  # Java/C#/C++
+        
+        # Variable declarations
+        r"(?:const|let|var)\s+\w+\s*=",  # JavaScript
+        r"(?:int|float|double|string|bool|char)\s+\w+\s*=",  # C/C++/C#/Java
+        
+        # Import statements
+        r"import\s+[\w.]+",  # Python/Java
+        r"from\s+[\w.]+\s+import",  # Python
+        r"#include\s+<[\w.]+>",  # C/C++
+        
+        # Class definitions
+        r"class\s+\w+",  # Many languages
+        
+        # For loops
+        r"for\s*\([^)]*\)\s*{",  # C-style
+        r"for\s+\w+\s+in\s+",  # Python
+    ]
+    
+    has_code_patterns = any(re.search(pattern, text) for pattern in code_indicators)
+    
+    # Check for code indentation (4 spaces or tabs at the beginning of multiple lines)
+    indentation_pattern = r"(?m)^(?:\t|    ).+"
+    has_indentation = bool(re.search(indentation_pattern, text))
+    
+    if has_code_patterns or has_indentation:
+        # Try to determine where the query ends and code begins
+        lines = text.split("\n")
+        
+        # Assume the first line is the query and the rest is code
+        # if there are multiple lines and the first doesn't look like code
+        if len(lines) > 1 and not any(re.search(pattern, lines[0]) for pattern in code_indicators):
+            query = lines[0].strip()
+            code_snippet = "\n".join(lines[1:]).strip()
+            return True, code_snippet, query
+        else:
+            # If we can't determine a clear separation, assume it's all code and use a default query
+            return True, text, "Analyze this code and suggest improvements."
+    
+    return False, None, None
+
+def format_code_response(response: str) -> str:
+    """
+    Format a code analysis response for better readability.
+    
+    Args:
+        response: The response from Perplexity
+        
+    Returns:
+        Formatted response
+    """
+    # Find code blocks in the response and properly format them
+    code_pattern = r"```(?:\w+)?\n([\s\S]+?)```"
+    
+    def replace_code(match):
+        code = match.group(1).strip()
+        return f"```\n{code}\n```"
+    
+    formatted_response = re.sub(code_pattern, replace_code, response)
+    
+    return formatted_response 
