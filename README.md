@@ -144,3 +144,20 @@ This feature will make the bot more accessible for users who prefer voice intera
 
 ## License
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+### Demo photos
+
+![image](https://github.com/user-attachments/assets/65dca347-ecb1-4949-85b5-f396b5f8008a)
+
+![image](https://github.com/user-attachments/assets/c5fceece-8d47-42e6-b3cf-eb1924e34289)
+
+![image](https://github.com/user-attachments/assets/e688311e-edfe-4a42-a537-7d1a6dd312c0)
+
+![image](https://github.com/user-attachments/assets/10ffce53-d3e6-4fad-9a5c-5e3fca0a107a)
+
+![image](https://github.com/user-attachments/assets/eabb350e-2578-4b30-bcf6-fdf2e23a7f59)
+
+
+
+
+
